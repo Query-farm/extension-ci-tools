@@ -1,0 +1,119 @@
+# Query.Farm: keep this fork current with duckdb/extension-ci-tools.
+#
+# Daily: fast-forward `main` to upstream main (main stays a pure mirror), rebase
+# `query-farm` onto it and force-push `query-farm` (only that branch, only when
+# the rebase is clean). On any failure an issue is opened/updated.
+#
+# Scheduled workflows only run from the default branch, so `query-farm` is the
+# fork's default branch.
+#
+# Pushing commits that touch .github/workflows/ requires the `workflows`
+# permission, which GITHUB_TOKEN cannot have. Set the CI_TOOLS_SYNC_TOKEN secret
+# (fine-grained PAT on this repo: Contents read/write + Workflows read/write) to
+# allow that; without it, syncs that include upstream workflow changes fail with
+# an issue explaining this.
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'Query-farm/extension-ci-tools'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: query-farm
+          fetch-depth: 0
+          token: ${{ secrets.CI_TOOLS_SYNC_TOKEN || github.token }}
+
+      - name: Sync main and rebase query-farm
+        id: sync
+        env:
+          HAS_SYNC_TOKEN: ${{ secrets.CI_TOOLS_SYNC_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          fail() {
+            {
+              echo "reason<<EOF_REASON"
+              echo "$1"
+              echo "EOF_REASON"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::$1"
+            exit 1
+          }
+          push_hint() {
+            if [ "${HAS_SYNC_TOKEN}" != "true" ]; then
+              echo "Upstream changes under .github/workflows/ cannot be pushed with GITHUB_TOKEN. Add a CI_TOOLS_SYNC_TOKEN secret (fine-grained PAT: Contents + Workflows read/write on this repository)."
+            fi
+          }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/duckdb/extension-ci-tools.git
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin main query-farm
+
+          upstream_sha="$(git rev-parse upstream/main)"
+          main_sha="$(git rev-parse origin/main)"
+          qf_sha="$(git rev-parse origin/query-farm)"
+          echo "upstream/main=${upstream_sha} origin/main=${main_sha} origin/query-farm=${qf_sha}"
+
+          # 1. main: fast-forward only, never rewritten.
+          if [ "${main_sha}" != "${upstream_sha}" ]; then
+            if ! git merge-base --is-ancestor "${main_sha}" "${upstream_sha}"; then
+              fail "origin/main (${main_sha}) has diverged from upstream/main (${upstream_sha}); main must be a pure mirror. Fix it manually."
+            fi
+            if ! git push origin "${upstream_sha}:refs/heads/main" 2>push.log; then
+              cat push.log
+              fail "Fast-forwarding main to ${upstream_sha} failed: $(tail -n 3 push.log) $(push_hint)"
+            fi
+            echo "main fast-forwarded to ${upstream_sha}"
+          fi
+
+          # 2. query-farm: rebase onto upstream main when it is not already based on it.
+          if git merge-base --is-ancestor "${upstream_sha}" "${qf_sha}"; then
+            echo "query-farm already contains upstream/main; nothing to do"
+            exit 0
+          fi
+          git checkout -q -B query-farm "${qf_sha}"
+          if ! git rebase upstream/main; then
+            conflicts="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+            git rebase --abort || true
+            fail "Rebasing query-farm onto upstream/main (${upstream_sha}) has conflicts in: ${conflicts:-unknown}. Rebase manually and force-push query-farm."
+          fi
+          if ! git push --force-with-lease="query-farm:${qf_sha}" origin HEAD:refs/heads/query-farm 2>push.log; then
+            cat push.log
+            fail "Force-pushing the rebased query-farm failed: $(tail -n 3 push.log) $(push_hint)"
+          fi
+          echo "query-farm rebased onto ${upstream_sha}: $(git rev-parse HEAD)"
+
+      - name: Report failure
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REASON: ${{ steps.sync.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Upstream sync failed"
+          body="$(printf '%s\n\n%s\n' "${REASON:-See the workflow log.}" "Run: ${RUN_URL}")"
+          number="$(gh issue list -R "${GITHUB_REPOSITORY}" --state open --search "in:title \"${title}\"" --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [ -n "${number}" ]; then
+            gh issue comment "${number}" -R "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            gh issue create -R "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
+          fi
