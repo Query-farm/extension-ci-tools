@@ -22,7 +22,8 @@ on:
       override_ci_tools_repository:
         type: string
         required: false
-        default: "duckdb/extension-ci-tools"
+        # Query.Farm: use this fork's scripts (pair with ci_tools_version: query-farm)
+        default: "Query-farm/extension-ci-tools"
       ci_tools_version:
         type: string
         required: true

@@ -717,6 +717,11 @@ class PhaseRunner:
             "DUCKDB_PREBUILT_EXTENSIONS": self.value("DUCKDB_PREBUILT_EXTENSIONS"),
         }
         values.update(test_environment(self.value("CI_TEST_CONFIG", "{}")))
+        # Query.Farm: optional remote ccache (set by scripts/setup_ccache.sh when a
+        # token is supplied). Passed at runtime only, never baked into the image.
+        remote_storage = self.value("CCACHE_REMOTE_STORAGE")
+        if remote_storage:
+            values["CCACHE_REMOTE_STORAGE"] = remote_storage
         prebuilt_library = self.value("DUCKDB_PREBUILT_LIBRARY")
         if prebuilt_library:
             relative_library = Path(prebuilt_library).resolve().relative_to(

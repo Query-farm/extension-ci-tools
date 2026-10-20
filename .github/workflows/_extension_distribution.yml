@@ -20,6 +20,11 @@ on:
         required: false
       VCPKG_CACHING_AWS_DEFAULT_REGION:
         required: false
+      # Query.Farm: optional bearer token for the remote ccache (see ccache_remote_url).
+      # When empty (forks, PRs from forks, other orgs) only the local GitHub Actions
+      # cache is used, exactly like upstream.
+      ccache_remote_token:
+        required: false
     inputs:
       # The name with which the extension will be built
       extension_name:
@@ -98,7 +103,8 @@ on:
       override_ci_tools_repository:
         required: false
         type: string
-        default: "duckdb/extension-ci-tools"
+        # Query.Farm: scripts and Dockerfiles come from this fork (pair with ci_tools_version: query-farm)
+        default: "Query-farm/extension-ci-tools"
       # Override the duckdb repository (for using this workflow from a DuckDB fork)
       override_duckdb_repository:
         required: false
@@ -211,6 +217,11 @@ on:
         required: false
         type: string
         default: '13'
+      # Query.Farm: HTTPS remote ccache endpoint, used only when the ccache_remote_token secret is set
+      ccache_remote_url:
+        required: false
+        type: string
+        default: "https://haybarn-vcpkg-cache.rusty-bb6.workers.dev/ccache"
 
 env:
   VCPKG_BINARY_SOURCES: ${{inputs.vcpkg_binary_sources == '' && 'clear;http,https://vcpkg-cache.duckdb.org,read' || inputs.vcpkg_binary_sources }}
@@ -354,6 +365,17 @@ jobs:
         id: prepare_sources
         run: python3 extension-ci-tools/scripts/ci_phase.py checkout
 
+      - &setup-ccache-binaries
+        # Query.Farm: pinned ccache + HTTPS storage helper (ccache-action then detects it
+        # instead of installing an older ccache); enables remote storage when a token is set.
+        name: Setup / Ccache binaries and remote storage
+        continue-on-error: true
+        shell: bash
+        env:
+          CCACHE_REMOTE_TOKEN: ${{ secrets.ccache_remote_token }}
+          CCACHE_REMOTE_URL: ${{ inputs.ccache_remote_url }}
+        run: bash extension-ci-tools/scripts/setup_ccache.sh
+
       - name: Setup / Ccache
         uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
         continue-on-error: true
@@ -367,11 +389,34 @@ jobs:
             ccache-extension-distribution-${{ matrix.duckdb_arch }}-
           save: ${{ inputs.save_cache }}
 
+      - &zero-ccache-stats
+        # Query.Farm: zero counters restored from the GitHub cache so the stats are per run
+        name: Setup / Ccache reset statistics
+        continue-on-error: true
+        shell: bash
+        run: ccache -z
+
       - name: Setup
         run: python3 extension-ci-tools/scripts/ci_phase.py setup
 
       - name: Build
         run: python3 extension-ci-tools/scripts/ci_phase.py build
+
+      - &ccache-stats
+        name: Ccache / Statistics
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "ccache: $(command -v ccache)"
+          ccache --version | head -n 1
+          { ccache-storage-https --version 2>&1 || true; } | grep '^Version' || true
+          if [ "${CI_PLATFORM}" = "linux" ] && docker image inspect "duckdb/${DUCKDB_PLATFORM}" >/dev/null 2>&1; then
+            echo "Compiler-side ccache in duckdb/${DUCKDB_PLATFORM}:"
+            docker run --rm "duckdb/${DUCKDB_PLATFORM}" sh -c 'ccache --version | head -n 1; { ccache-storage-https --version 2>&1 || true; } | grep "^Version"' || true
+          fi
+          echo "Remote ccache enabled: ${CCACHE_REMOTE_ENABLED:-false}"
+          ccache -s -v
 
       - name: Test
         run: python3 extension-ci-tools/scripts/ci_phase.py test
@@ -462,6 +507,8 @@ jobs:
         with:
           go-version: '1.23'
 
+      - *setup-ccache-binaries
+
       - name: Setup / Ccache
         uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
         continue-on-error: true
@@ -475,11 +522,15 @@ jobs:
             ccache-extension-distribution-${{ matrix.duckdb_arch }}-
           save: ${{ inputs.save_cache }}
 
+      - *zero-ccache-stats
+
       - name: Setup
         run: python3 extension-ci-tools/scripts/ci_phase.py setup
 
       - name: Build
         run: python3 extension-ci-tools/scripts/ci_phase.py build
+
+      - *ccache-stats
 
       - name: Test
         run: python3 extension-ci-tools/scripts/ci_phase.py test
@@ -584,6 +635,8 @@ jobs:
         with:
           go-version: '1.23'
 
+      - *setup-ccache-binaries
+
       - name: Setup / Ccache
         uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
         with:
@@ -595,6 +648,8 @@ jobs:
             extension-distribution-${{ matrix.duckdb_arch }}-
             ccache-extension-distribution-${{ matrix.duckdb_arch }}-
           save: ${{ inputs.save_cache }}
+
+      - *zero-ccache-stats
 
       - name: Setup / Rtools
         if: ${{ matrix.duckdb_arch == 'windows_amd64_rtools' || matrix.duckdb_arch == 'windows_amd64_mingw' }}
@@ -624,6 +679,8 @@ jobs:
 
       - name: Build
         run: python extension-ci-tools/scripts/ci_phase.py build
+
+      - *ccache-stats
 
       - name: Test
         run: python extension-ci-tools/scripts/ci_phase.py test
@@ -722,6 +779,38 @@ jobs:
         with:
           go-version: '1.23'
 
+      - *setup-ccache-binaries
+
+      - name: Setup / Emscripten at a stable path
+        # Query.Farm: setup-emsdk activates emsdk from a random $RUNNER_TEMP/<uuid> directory,
+        # which ends up in preprocessed output (sysroot line markers) and defeats ccache across
+        # runs and repositories. Re-activate the identical copy it placed in the fixed-path tool cache.
+        if: ${{ env.CCACHE_REMOTE_ENABLED == 'true' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          shopt -s nullglob
+          roots=("${RUNNER_TOOL_CACHE}"/emsdk/*/*/emsdk-main)
+          if [ "${#roots[@]}" -ne 1 ]; then
+            echo "::warning::expected one emsdk in the tool cache, found ${#roots[@]}; keeping setup-emsdk paths"
+            exit 0
+          fi
+          root="${roots[0]}"
+          version="$(basename "$(dirname "$(dirname "${root}")")")"
+          cd "${root}"
+          ./emsdk activate "${version}"
+          ./emsdk construct_env > "${RUNNER_TEMP}/emsdk_env.log" 2>&1
+          while IFS= read -r line; do
+            case "${line}" in
+              "PATH += "*) echo "${line#PATH += }" >> "${GITHUB_PATH}" ;;
+              PATH\ =*|export\ *) ;;
+              [A-Z]*" = "*) key="${line%% = *}"; [[ "${key}" =~ ^[A-Z_]+$ ]] && echo "${key}=${line#* = }" >> "${GITHUB_ENV}" ;;
+            esac
+          done < "${RUNNER_TEMP}/emsdk_env.log"
+          # The tool-cache copy does not preserve mtimes, so identify the compiler by version.
+          echo "CCACHE_COMPILERCHECK=string:emsdk-${version}" >> "${GITHUB_ENV}"
+          echo "emsdk ${version} activated from ${root}"
+
       - name: Setup / Ccache
         uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
         continue-on-error: true
@@ -735,11 +824,15 @@ jobs:
             ccache-extension-distribution-${{ matrix.duckdb_arch }}-
           save: ${{ inputs.save_cache }}
 
+      - *zero-ccache-stats
+
       - name: Setup
         run: python3 extension-ci-tools/scripts/ci_phase.py setup
 
       - name: Build
         run: python3 extension-ci-tools/scripts/ci_phase.py build
+
+      - *ccache-stats
 
       - name: Test
         run: python3 extension-ci-tools/scripts/ci_phase.py test

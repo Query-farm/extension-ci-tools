@@ -6,7 +6,30 @@ RUN yum install -y curl zip unzip tar autoconf libtool
 RUN yum install -y ninja-build
 RUN yum install -y perl-IPC-Cmd
 RUN yum install -y perl-core
-RUN yum install -y ccache
+# Query.Farm: EPEL's ccache (3.7.7) cannot use remote
+# storage, so install the pinned upstream musl-static ccache (fully static, runs
+# on any libc) plus the ccache-storage-http-go helper as ccache-storage-https,
+# which ccache spawns for https:// remote_storage URLs. Remote storage is only
+# configured at runtime (docker_env.txt) when a token is supplied.
+ARG CCACHE_VERSION=4.13.6
+ARG CCACHE_SHA256=09e0547a0c3b250a76675c33130366f1399f3580842fb360c052520d56214ead
+ARG CCACHE_HELPER_VERSION=0.10
+ARG CCACHE_HELPER_SHA256=88963ef2cc21ca588145d46bcb02b8295275975ed75696eedf2cdb0e9543edd0
+RUN set -eux; \
+    cd /tmp; \
+    curl -fsSL --retry 3 -o ccache.tar.gz "https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}-linux-x86_64-musl-static.tar.gz"; \
+    echo "${CCACHE_SHA256}  ccache.tar.gz" | sha256sum -c -; \
+    tar -xzf ccache.tar.gz; \
+    install -m 0755 "ccache-${CCACHE_VERSION}-linux-x86_64-musl-static/ccache" /usr/local/bin/ccache; \
+    curl -fsSL --retry 3 -o helper.tar.gz "https://github.com/ccache/ccache-storage-http-go/releases/download/v${CCACHE_HELPER_VERSION}/ccache-storage-http-go-${CCACHE_HELPER_VERSION}-linux-amd64.tar.gz"; \
+    echo "${CCACHE_HELPER_SHA256}  helper.tar.gz" | sha256sum -c -; \
+    tar -xzf helper.tar.gz; \
+    install -m 0755 "ccache-storage-http-go-${CCACHE_HELPER_VERSION}-linux-amd64/ccache-storage-http" /usr/local/bin/ccache-storage-http; \
+    ln -sf ccache-storage-http /usr/local/bin/ccache-storage-https; \
+    rm -rf /tmp/ccache* /tmp/helper.tar.gz; \
+    ccache --version | head -n 1; \
+    { ccache-storage-https --version 2>&1 || true; } | grep '^Version'
+
 RUN yum install -y java-11-openjdk-devel maven
 RUN yum install -y wget
 RUN yum install -y kernel-headers

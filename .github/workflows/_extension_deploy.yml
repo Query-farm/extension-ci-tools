@@ -28,7 +28,8 @@ on:
       override_ci_tools_repository:
         required: false
         type: string
-        default: "duckdb/extension-ci-tools"
+        # Query.Farm: use this fork's scripts (pair with ci_tools_version: query-farm)
+        default: "Query-farm/extension-ci-tools"
       # ';' separated list of architectures to exclude, for example: 'linux_amd64;osx_arm64'
       exclude_archs:
         required: false

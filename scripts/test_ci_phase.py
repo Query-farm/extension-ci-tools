@@ -980,6 +980,24 @@ class CIPhaseTest(unittest.TestCase):
             self.assertIn("CCACHE_MAXSIZE=5G\n", docker_environment)
             configure = runner.commands[-2][0]
             self.assertIn(f"{Path(directory).resolve() / '.ccache'}:/ccache_dir", configure)
+            self.assertNotIn("CCACHE_REMOTE_STORAGE", docker_environment)
+
+    def test_linux_build_forwards_optional_remote_ccache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.environment(directory)
+            remote = "https://cache.example/ccache @bearer-token=secret data-timeout=15s"
+            env.update(
+                {
+                    "CI_VCPKG_URL": "https://github.com/microsoft/vcpkg.git",
+                    "CI_VCPKG_COMMIT": "abc123",
+                    "CI_VCPKG_OVERLAY_PORTS": "extension-ci-tools/vcpkg_ports",
+                    "CI_VCPKG_OVERLAY_TRIPLETS": "extension-ci-tools/toolchains",
+                    "CCACHE_REMOTE_STORAGE": remote,
+                }
+            )
+            RecordingRunner(env).build_linux()
+            docker_environment = Path(directory, "docker_env.txt").read_text(encoding="utf-8")
+            self.assertIn(f"CCACHE_REMOTE_STORAGE={remote}\n", docker_environment)
 
     def test_windows_build_selects_vcvars_before_running_shell(self):
         with tempfile.TemporaryDirectory() as directory:
