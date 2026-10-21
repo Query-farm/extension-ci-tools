@@ -78,6 +78,14 @@ on:
         required: false
         type: boolean
         default: false
+      test_jobs:
+        # Query.Farm: off by default. Every build job already runs the tests on the binaries it
+        # just built (duckdb-ci/build-duckdb's test step); the extra jobs re-test the uploaded
+        # artifacts on fresh runners at the cost of ~5 more jobs per run.
+        description: Also re-test the uploaded artifacts in separate test jobs
+        required: false
+        type: boolean
+        default: false
       save_cache:
         description: Save ccache after the build
         required: false
@@ -148,6 +156,7 @@ env:
   CI_SKIP_TESTS: ${{ inputs.skip_tests }}
   CI_EXTENSIONS_TEST_SELECTION: complete
   CI_TEST_CONFIG: ${{ inputs.test_config }}
+  CI_BUNDLE_TEST_SUPPORT: ${{ inputs.test_jobs }}
   # Query.Farm: vcpkg is pinned to the commit DuckDB v2.0.0 itself builds with; callers cannot override it.
   CI_VCPKG_URL: https://github.com/microsoft/vcpkg.git
   CI_VCPKG_COMMIT: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
@@ -743,7 +752,7 @@ jobs:
     name: Test Linux (${{ matrix.duckdb_arch }})
     continue-on-error: ${{ contains(format(';{0};', inputs.allow_failure_archs), format(';{0};', matrix.duckdb_arch)) }}
     needs: [matrix, build_linux]
-    if: ${{ !cancelled() && needs.matrix.outputs.test_linux != '' && needs.matrix.outputs.test_linux != '{"include":[]}' && needs.build_linux.result == 'success' }}
+    if: ${{ inputs.test_jobs && !cancelled() && needs.matrix.outputs.test_linux != '' && needs.matrix.outputs.test_linux != '{"include":[]}' && needs.build_linux.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     container:
       image: ${{ matrix.container }}
@@ -792,7 +801,7 @@ jobs:
     name: Test macOS (${{ matrix.duckdb_arch }})
     continue-on-error: ${{ contains(format(';{0};', inputs.allow_failure_archs), format(';{0};', matrix.duckdb_arch)) }}
     needs: [matrix, build_macos]
-    if: ${{ !cancelled() && needs.matrix.outputs.test_macos != '' && needs.matrix.outputs.test_macos != '{"include":[]}' && needs.build_macos.result == 'success' }}
+    if: ${{ inputs.test_jobs && !cancelled() && needs.matrix.outputs.test_macos != '' && needs.matrix.outputs.test_macos != '{"include":[]}' && needs.build_macos.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -843,7 +852,7 @@ jobs:
     name: Test Windows (${{ matrix.duckdb_arch }})
     continue-on-error: ${{ contains(format(';{0};', inputs.allow_failure_archs), format(';{0};', matrix.duckdb_arch)) }}
     needs: [matrix, build_windows]
-    if: ${{ !cancelled() && needs.matrix.outputs.test_windows != '' && needs.matrix.outputs.test_windows != '{"include":[]}' && needs.build_windows.result == 'success' }}
+    if: ${{ inputs.test_jobs && !cancelled() && needs.matrix.outputs.test_windows != '' && needs.matrix.outputs.test_windows != '{"include":[]}' && needs.build_windows.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

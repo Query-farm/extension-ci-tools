@@ -954,6 +954,9 @@ class PhaseRunner:
     def _test_support_enabled(self) -> bool:
         if self.enabled("CI_SKIP_TESTS") or self.platform == "wasm":
             return False
+        # Query.Farm: build.yml only needs the bundle when separate test jobs run.
+        if self.value("CI_BUNDLE_TEST_SUPPORT").lower() == "false":
+            return False
         if self.platform == "linux":
             return self.architecture != "linux_arm64"
         if self.platform == "macos":

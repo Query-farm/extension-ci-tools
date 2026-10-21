@@ -1250,6 +1250,10 @@ class CIPhaseTest(unittest.TestCase):
             native_macos_env = self.environment(directory, "macos", "osx_arm64")
             native_macos_env["CI_OSX_BUILD_ARCH"] = "arm64"
             cases += ((native_macos_env, True),)
+            for value, expected in (("false", False), ("true", True), ("", True)):
+                env = self.environment(directory)
+                env["CI_BUNDLE_TEST_SUPPORT"] = value
+                cases += ((env, expected),)
 
             for env, expected in cases:
                 with self.subTest(
