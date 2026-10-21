@@ -222,6 +222,15 @@ on:
         required: false
         type: string
         default: "https://haybarn-vcpkg-cache.rusty-bb6.workers.dev/ccache"
+      # Query.Farm: off by default. A staged DuckDB archive reports its own version (e.g.
+      # v2.0.0-alpha49225), not the branch label the extension and the build's local
+      # extension repository are built for (e.g. v2.0-cyanoptera), so `require <ext>` in
+      # sqllogictests cannot load the extension and every test is silently skipped.
+      # Building DuckDB from source (fast with the remote ccache) keeps them consistent.
+      fetch_prebuilt_duckdb:
+        required: false
+        type: boolean
+        default: false
 
 env:
   VCPKG_BINARY_SOURCES: ${{inputs.vcpkg_binary_sources == '' && 'clear;http,https://vcpkg-cache.duckdb.org,read' || inputs.vcpkg_binary_sources }}
@@ -255,7 +264,7 @@ env:
   CI_RUST_LOGS: ${{ inputs.rust_logs }}
   CI_RUN_DISK_CLEAN_STEP: ${{ inputs.run_disk_clean_step }}
   CI_USE_DEFAULT_RUNNERS: ${{ inputs.runners == '{}' }}
-  CI_FETCH_PREBUILT_DUCKDB: true
+  CI_FETCH_PREBUILT_DUCKDB: ${{ inputs.fetch_prebuilt_duckdb }}
 
 jobs:
   generate_matrix:
