@@ -124,7 +124,8 @@ Query.Farm differences from upstream:
   per-run vcpkg cache save is disabled. An optional writable http cache (`vcpkg_remote_url`,
   written with `ccache_remote_token`) replaces the GitHub cache when set; it is off by default.
 - `test_config` input (test environment variables).
-- Tests run in each build job; the separate artifact test jobs are opt-in (`test_jobs: true`).
+- Tests run in each build job and again in per-platform test jobs on the uploaded artifacts
+  (`test_jobs`, default true; linux_arm64 is not tested, as in the legacy pipeline).
 - Artifacts are named `<group>-extensions-<arch>` and contain an extension repository tree.
 
 Other inputs: `exclude_archs` (default `wasm_mvp;wasm_eh;wasm_threads`),

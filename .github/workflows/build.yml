@@ -79,13 +79,13 @@ on:
         type: boolean
         default: false
       test_jobs:
-        # Query.Farm: off by default. Every build job already runs the tests on the binaries it
-        # just built (duckdb-ci/build-duckdb's test step); the extra jobs re-test the uploaded
-        # artifacts on fresh runners at the cost of ~5 more jobs per run.
-        description: Also re-test the uploaded artifacts in separate test jobs
+        # Query.Farm: build jobs already run the tests on the binaries they just built
+        # (duckdb-ci/build-duckdb's test step); the test jobs re-test the uploaded artifacts on
+        # fresh runners. Set false only to save runners while iterating.
+        description: Re-test the uploaded artifacts in separate per-platform test jobs
         required: false
         type: boolean
-        default: false
+        default: true
       save_cache:
         description: Save ccache after the build
         required: false
