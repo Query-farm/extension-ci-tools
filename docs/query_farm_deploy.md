@@ -1,7 +1,7 @@
 # Query.Farm extension deploy
 
 `.github/workflows/_query_farm_deploy.yml` signs the binaries produced by
-`_extension_distribution.yml` and publishes them to the Query.Farm extension
+`build.yml` (preferred) or the legacy `_extension_distribution.yml` and publishes them to the Query.Farm extension
 repository: R2 bucket `query-farm-duckdb-extensions`, served at
 `https://duckdb-extensions.query.farm`. The logic lives in
 `scripts/query_farm/deploy.py` (unit tests: `scripts/query_farm/test_deploy.py`).
@@ -12,8 +12,11 @@ repository: R2 bucket `query-farm-duckdb-extensions`, served at
    If `duckdb_version` is not a release label (`^v[0-9]+\.[0-9]+\.[0-9]+$`, e.g.
    `v2.0.0`), the deploy job is skipped with a notice. This keeps
    `v2.0-cyanoptera` and any other dev or alpha builds out of the repository.
-2. **Download** every artifact named `<extension_name>-<duckdb_version>-extension-<arch>`
-   from the current run and drop the architectures in `exclude_archs`. By default
+2. **Download** the build artifacts of the current run: `<group>-extensions-<arch>`
+   from `build.yml` (the extension must sit at `<duckdb_version>/<arch>/` inside it;
+   other extensions and test-support bundles in it are ignored) or
+   `<extension_name>-<duckdb_version>-extension-<arch>` from `_extension_distribution.yml`.
+   Two artifacts providing the same arch fail the deploy. Then drop the architectures in `exclude_archs`. By default
    that is all wasm archs, because DuckDB-Wasm repository support is unverified.
 3. **Footer checks** for each arch. The deploy fails if the footer magic is wrong,
    if the footer platform differs from the artifact's arch, or if the footer DuckDB
@@ -69,11 +72,15 @@ dispatch. The workflow also refuses `pull_request` events itself, as a second gu
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: Query-farm/extension-ci-tools/.github/workflows/_extension_distribution.yml@query-farm
+    uses: Query-farm/extension-ci-tools/.github/workflows/build.yml@query-farm
     with:
-      duckdb_version: v2.0.0
-      ci_tools_version: query-farm
-      extension_name: hashfuncs
+      duckdb_version: v2.0.0          # tag; resolved to its commit, and the footer label
+      groups: |
+        main:
+          config: extension_config.cmake
+          toolchain: main
+      # exclude_archs: wasm_mvp;wasm_eh;wasm_threads
+      # test_config: '{"test_env_variables":{"NAME":"value"}}'
     secrets:
       ccache_remote_token: ${{ secrets.QUERY_FARM_CCACHE_TOKEN }}
 
@@ -93,6 +100,31 @@ jobs:
       r2_access_key_id: ${{ secrets.QUERY_FARM_R2_ACCESS_KEY_ID }}
       r2_secret_access_key: ${{ secrets.QUERY_FARM_R2_SECRET_ACCESS_KEY }}
 ```
+
+The legacy build job (`_extension_distribution.yml@query-farm` with `extension_name`,
+`duckdb_version` and `ci_tools_version: query-farm`) works with the same deploy job.
+
+### build.yml in this fork
+
+`build.yml` builds Linux inside DuckDB's published `ghcr.io/duckdb/duckdb-ci` images
+(manylinux_2_28, alpine for musl) instead of building a Docker image per run.
+Query.Farm differences from upstream:
+
+- extension-ci-tools defaults to `Query-farm/extension-ci-tools@query-farm`; vcpkg is pinned
+  to DuckDB v2.0.0's commit and cannot be overridden.
+- `duckdb_version` may be a tag or branch; it is resolved to a commit (DuckDB's CMake needs one).
+- DuckDB is built from source by default (`prebuilt_source` defaults to `disabled`): a staged
+  prebuilt DuckDB carries a pre-release label (e.g. `v2.0.0-alpha49307`) into the extension footer.
+- Remote ccache (`ccache_remote_token` secret, `ccache_remote_url` input) with the pinned ccache
+  from `scripts/setup_ccache.sh`, per-run ccache statistics, stable emsdk paths for wasm.
+- vcpkg binary cache (`scripts/setup_vcpkg_cache.sh`): vcpkg's http provider against
+  `vcpkg_remote_url` (the Query.Farm R2 cache, shared by all repositories), read anonymously
+  and written with `ccache_remote_token`. Without the token, a files cache in the GitHub Actions
+  cache is used as well, saved only when new packages were built. duckdb-ci's own per-run vcpkg
+  cache save is disabled.
+- `test_config` input (test environment variables).
+- Tests run in each build job; the separate artifact test jobs are opt-in (`test_jobs: true`).
+- Artifacts are named `<group>-extensions-<arch>` and contain an extension repository tree.
 
 Other inputs: `exclude_archs` (default `wasm_mvp;wasm_eh;wasm_threads`),
 `deploy_latest` / `deploy_versioned` (default true), `require_release_label`
