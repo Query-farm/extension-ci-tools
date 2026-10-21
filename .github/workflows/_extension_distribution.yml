@@ -444,16 +444,15 @@ jobs:
   macos:
     name: ${{ matrix.duckdb_arch }}
     runs-on: ${{ startsWith(matrix.runner, '[') && fromJSON(matrix.runner) || matrix.runner }}
+    # Query.Farm: start every platform as soon as the matrix exists instead of waiting for linux.
     needs:
       - generate_matrix
-      - linux
     if: |
       always() &&
       !cancelled() &&
       needs.generate_matrix.outputs.osx_matrix != '{}' &&
       needs.generate_matrix.outputs.osx_matrix != '' &&
-      needs.generate_matrix.result == 'success' &&
-      (inputs.reduced_ci_mode == 'disabled' || needs.linux.result == 'success' || needs.linux.result == 'skipped')
+      needs.generate_matrix.result == 'success'
     strategy:
       fail-fast: ${{ inputs.reduced_ci_mode != 'disabled' }}
       matrix: ${{ fromJson(needs.generate_matrix.outputs.osx_matrix) }}
@@ -558,16 +557,15 @@ jobs:
   windows:
     name: ${{ matrix.duckdb_arch }}
     runs-on: ${{ startsWith(matrix.runner, '[') && fromJSON(matrix.runner) || matrix.runner }}
+    # Query.Farm: start every platform as soon as the matrix exists instead of waiting for linux.
     needs:
       - generate_matrix
-      - linux
     if: |
       always() &&
       !cancelled() &&
       needs.generate_matrix.outputs.windows_matrix != '{}' &&
       needs.generate_matrix.outputs.windows_matrix != '' &&
-      needs.generate_matrix.result == 'success' &&
-      (inputs.reduced_ci_mode == 'disabled' || needs.linux.result == 'success' || needs.linux.result == 'skipped')
+      needs.generate_matrix.result == 'success'
     strategy:
       fail-fast: ${{ inputs.reduced_ci_mode != 'disabled' }}
       matrix: ${{ fromJson(needs.generate_matrix.outputs.windows_matrix) }}
@@ -708,16 +706,15 @@ jobs:
   wasm:
     name: ${{ matrix.duckdb_arch }}
     runs-on: ${{ startsWith(matrix.runner, '[') && fromJSON(matrix.runner) || matrix.runner }}
+    # Query.Farm: start every platform as soon as the matrix exists instead of waiting for linux.
     needs:
       - generate_matrix
-      - linux
     if: |
       always() &&
       !cancelled() &&
       needs.generate_matrix.outputs.wasm_matrix != '{}' &&
       needs.generate_matrix.outputs.wasm_matrix != '' &&
-      needs.generate_matrix.result == 'success' &&
-      (inputs.reduced_ci_mode == 'disabled' || needs.linux.result == 'success' || needs.linux.result == 'skipped')
+      needs.generate_matrix.result == 'success'
     strategy:
       fail-fast: ${{ inputs.reduced_ci_mode != 'disabled' }}
       matrix: ${{ fromJson(needs.generate_matrix.outputs.wasm_matrix) }}
