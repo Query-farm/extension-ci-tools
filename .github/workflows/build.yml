@@ -186,6 +186,7 @@ jobs:
         env:
           INPUT_DUCKDB_VERSION: ${{ inputs.duckdb_version }}
           INPUT_DUCKDB_COMMIT: ${{ inputs.duckdb_commit }}
+          INPUT_DUCKDB_REPOSITORY: ${{ inputs.duckdb_repository }}
         run: |
           set -euo pipefail
           duckdb_commit="${INPUT_DUCKDB_COMMIT:-${INPUT_DUCKDB_VERSION}}"
@@ -196,6 +197,20 @@ jobs:
               exit 1
             fi
             duckdb_version="${duckdb_commit}"
+          fi
+          # Query.Farm: DuckDB's CMake requires DUCKDB_COMMIT to be a hex commit, so resolve a
+          # tag or branch (e.g. duckdb_version: v2.0.0 alone) to the commit it points at.
+          if [[ ! "${duckdb_commit}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            duckdb_remote="https://github.com/${INPUT_DUCKDB_REPOSITORY:-duckdb/duckdb}"
+            refs="$(git ls-remote "${duckdb_remote}" "refs/tags/${duckdb_commit}" "refs/tags/${duckdb_commit}^{}" "refs/heads/${duckdb_commit}")"
+            resolved="$(awk '$2 ~ /\^\{\}$/ {print $1; exit}' <<< "${refs}")"
+            [[ -n "${resolved}" ]] || resolved="$(awk 'NR == 1 {print $1}' <<< "${refs}")"
+            if [[ -z "${resolved}" ]]; then
+              echo "could not resolve DuckDB ref '${duckdb_commit}' in ${duckdb_remote}" >&2
+              exit 1
+            fi
+            echo "Resolved DuckDB ${duckdb_commit} to ${resolved}"
+            duckdb_commit="${resolved}"
           fi
           echo "version=${duckdb_version}" >> "$GITHUB_OUTPUT"
           echo "commit=${duckdb_commit}" >> "$GITHUB_OUTPUT"
