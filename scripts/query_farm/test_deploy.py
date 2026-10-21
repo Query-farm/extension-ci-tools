@@ -154,6 +154,13 @@ class PrepareTest(unittest.TestCase):
         self.assertEqual(plan[0]["cache_control"], deploy.VERSIONED_CACHE_CONTROL)
         self.assertEqual(plan[-1]["cache_control"], deploy.LATEST_CACHE_CONTROL)
         self.assertEqual(len(deploy.object_plan(manifest, True, False)), 2)
+        self.assertEqual([p["key"] for p in deploy.object_plan(manifest, True, False, "_pilot/")], [
+            "_pilot/v2.0.0/linux_amd64/quack.duckdb_extension.gz",
+            "_pilot/v2.0.0/osx_arm64/quack.duckdb_extension.gz",
+        ])
+        for bad in ("_pilot", ".well-known/", "/abs/", "a//", "../x/", "a b/"):
+            with self.assertRaises(deploy.DeployError, msg=bad):
+                deploy.object_plan(manifest, True, True, bad)
         with redirect_stdout(io.StringIO()) as out:
             deploy.upload(self.out, "bucket", "https://example.invalid", "https://repo.example", True, False, True)
         self.assertIn("DRY RUN", out.getvalue())

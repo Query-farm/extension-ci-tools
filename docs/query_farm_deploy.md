@@ -30,7 +30,10 @@ repository: R2 bucket `query-farm-duckdb-extensions`, served at
    whose key was never published.
 6. **gzip -9** each signed file, upload the `.gz` files and `manifest.json` as the
    workflow artifact `<name>-<duckdb_version>-signed`, then upload to R2. With
-   `dry_run`, it only prints each key, size and sha256.
+   `dry_run`, it only prints each key, size and sha256. Otherwise each object is
+   checked after upload: `head-object` must show the expected size, content type,
+   cache-control and sha256 metadata, and the object fetched from the public URL
+   must have the same sha256.
 
 | path | when | Cache-Control |
 |---|---|---|
@@ -94,7 +97,8 @@ jobs:
 Other inputs: `exclude_archs` (default `wasm_mvp;wasm_eh;wasm_threads`),
 `deploy_latest` / `deploy_versioned` (default true), `require_release_label`
 (default true; set false only for testing, together with `dry_run`),
-`repository_url`, `r2_bucket`, `r2_account_id`, `ci_tools_version`,
+`key_prefix` (default empty; e.g. `_pilot/` puts every key under a throwaway
+prefix for test uploads), `repository_url`, `r2_bucket`, `r2_account_id`, `ci_tools_version`,
 `override_ci_tools_repository`.
 
 ## Key rotation

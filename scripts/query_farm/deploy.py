@@ -427,7 +427,21 @@ def prepare(
     return results
 
 
-def object_plan(manifest: dict, deploy_latest: bool, deploy_versioned: bool) -> list[dict]:
+KEY_PREFIX = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9._-]*/)+")  # used with fullmatch
+
+
+def validate_key_prefix(prefix: str) -> str:
+    """Empty, or one or more 'segment/' parts; never '.well-known' or other dot-led segments."""
+    if prefix and not KEY_PREFIX.fullmatch(prefix):
+        raise DeployError(
+            f"key_prefix {prefix!r} must be empty or look like 'segment/' (letters, digits, '._-', "
+            "ending in '/', not starting with '.')"
+        )
+    return prefix
+
+
+def object_plan(manifest: dict, deploy_latest: bool, deploy_versioned: bool, key_prefix: str = "") -> list[dict]:
+    prefix = validate_key_prefix(key_prefix)
     name = manifest["extension_name"]
     duckdb_version = manifest["duckdb_version"]
     plan = []
@@ -437,7 +451,7 @@ def object_plan(manifest: dict, deploy_latest: bool, deploy_versioned: bool) -> 
             plan.append(
                 {
                     **entry,
-                    "key": f"{name}/{entry['extension_version']}/{duckdb_version}/{entry['arch']}/{filename}",
+                    "key": f"{prefix}{name}/{entry['extension_version']}/{duckdb_version}/{entry['arch']}/{filename}",
                     "cache_control": VERSIONED_CACHE_CONTROL,
                 }
             )
@@ -445,13 +459,53 @@ def object_plan(manifest: dict, deploy_latest: bool, deploy_versioned: bool) -> 
             plan.append(
                 {
                     **entry,
-                    "key": f"{duckdb_version}/{entry['arch']}/{filename}",
+                    "key": f"{prefix}{duckdb_version}/{entry['arch']}/{filename}",
                     "cache_control": LATEST_CACHE_CONTROL,
                 }
             )
     # Versioned objects first so "latest" never points at something missing a versioned copy.
     plan.sort(key=lambda item: (item["cache_control"] == LATEST_CACHE_CONTROL, item["key"]))
     return plan
+
+
+def _aws(args: list[str], endpoint: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["aws", *args, "--endpoint-url", endpoint], capture_output=True, text=True, check=False)
+
+
+def verify_uploaded(item: dict, bucket: str, endpoint: str, repository_url: str) -> None:
+    """Check the stored object's headers, then fetch it over the public URL and compare sha256."""
+    head = _aws(["s3api", "head-object", "--bucket", bucket, "--key", item["key"], "--output", "json"], endpoint)
+    if head.returncode != 0:
+        raise DeployError(f"head-object {item['key']} failed: {head.stderr.strip()[:500]}")
+    meta = json.loads(head.stdout)
+    problems = []
+    if meta.get("ContentLength") != item["gz_size"]:
+        problems.append(f"size {meta.get('ContentLength')} != {item['gz_size']}")
+    if meta.get("ContentType") != "application/octet-stream":
+        problems.append(f"content-type {meta.get('ContentType')!r}")
+    if meta.get("ContentEncoding"):
+        problems.append(f"unexpected content-encoding {meta.get('ContentEncoding')!r}")
+    if meta.get("CacheControl") != item["cache_control"]:
+        problems.append(f"cache-control {meta.get('CacheControl')!r}")
+    if meta.get("Metadata", {}).get("sha256") != item["gz_sha256"]:
+        problems.append("sha256 metadata mismatch")
+    # Query string sidesteps any cached copy of a previous upload at the same URL.
+    url = f"{repository_url.rstrip('/')}/{item['key']}?verify={item['gz_sha256'][:16]}"
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "query-farm-extension-deploy"})
+        with urllib.request.urlopen(request, timeout=120) as response:
+            body = response.read()
+            encoding = response.headers.get("Content-Encoding")
+    except Exception as error:  # noqa: BLE001
+        raise DeployError(f"could not fetch {url}: {error}") from error
+    public_sha = hashlib.sha256(body).hexdigest()
+    if public_sha != item["gz_sha256"]:
+        problems.append(f"public URL sha256 {public_sha} != {item['gz_sha256']}")
+    if encoding:
+        problems.append(f"public URL served Content-Encoding {encoding!r}")
+    if problems:
+        raise DeployError(f"verification of {item['key']} failed: " + "; ".join(problems))
+    print(f"Verified: s3://{bucket}/{item['key']} (headers + metadata) and {url} sha256={public_sha}")
 
 
 def upload(
@@ -462,9 +516,11 @@ def upload(
     deploy_latest: bool,
     deploy_versioned: bool,
     dry_run: bool,
+    key_prefix: str = "",
+    verify: bool = True,
 ) -> list[dict]:
     manifest = json.loads((out_dir / "manifest.json").read_text())
-    plan = object_plan(manifest, deploy_latest, deploy_versioned)
+    plan = object_plan(manifest, deploy_latest, deploy_versioned, key_prefix)
     if not plan:
         print("::warning::deploy_latest and deploy_versioned are both false; nothing to upload")
         return plan
@@ -480,17 +536,20 @@ def upload(
         rows.append(f"| `{item['key']}` | {item['gz_size']} | `{item['gz_sha256']}` | {item['cache_control']} |")
         if dry_run:
             continue
-        command = [
-            "aws", "s3", "cp", str(out_dir / item["file"]), f"s3://{bucket}/{item['key']}",
-            "--endpoint-url", endpoint,
-            "--content-type", "application/octet-stream",
-            "--cache-control", item["cache_control"],
-            "--metadata", f"sha256={item['gz_sha256']},extension-sha256={item['signed_sha256']}",
-            "--no-progress", "--only-show-errors",
-        ]
-        result = subprocess.run(command, check=False)
+        result = _aws(
+            [
+                "s3", "cp", str(out_dir / item["file"]), f"s3://{bucket}/{item['key']}",
+                "--content-type", "application/octet-stream",
+                "--cache-control", item["cache_control"],
+                "--metadata", f"sha256={item['gz_sha256']},extension-sha256={item['signed_sha256']}",
+                "--no-progress", "--only-show-errors",
+            ],
+            endpoint,
+        )
         if result.returncode != 0:
-            raise DeployError(f"upload of {item['key']} failed (exit {result.returncode})")
+            raise DeployError(f"upload of {item['key']} failed (exit {result.returncode}): {result.stderr.strip()[:500]}")
+        if verify:
+            verify_uploaded(item, bucket, endpoint, repository_url)
     title = "Query.Farm deploy (dry run)" if dry_run else "Query.Farm deploy"
     _summary(f"### {title}: {manifest['extension_name']} for DuckDB {manifest['duckdb_version']}\n\n" + "\n".join(rows))
     return plan
@@ -533,6 +592,8 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("--deploy-latest", type=_bool, default=True)
     up.add_argument("--deploy-versioned", type=_bool, default=True)
     up.add_argument("--dry-run", type=_bool, default=False)
+    up.add_argument("--key-prefix", default="", help="prepend to every object key, e.g. '_pilot/' (testing)")
+    up.add_argument("--verify", type=_bool, default=True, help="check each object via head-object and its public URL")
 
     args = parser.parse_args(argv)
     try:
@@ -566,6 +627,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.deploy_latest,
                 args.deploy_versioned,
                 args.dry_run,
+                args.key_prefix,
+                args.verify,
             )
     except DeployError as error:
         message = str(error)

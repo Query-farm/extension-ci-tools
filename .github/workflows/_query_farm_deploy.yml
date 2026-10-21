@@ -54,6 +54,11 @@ on:
         required: false
         type: boolean
         default: true
+      # Prepended to every object key, e.g. '_pilot/' for a throwaway test upload. Empty = real layout.
+      key_prefix:
+        required: false
+        type: string
+        default: ""
       repository_url:
         required: false
         type: string
@@ -186,6 +191,7 @@ jobs:
           DEPLOY_LATEST: ${{ inputs.deploy_latest }}
           DEPLOY_VERSIONED: ${{ inputs.deploy_versioned }}
           DRY_RUN: ${{ inputs.dry_run }}
+          KEY_PREFIX: ${{ inputs.key_prefix }}
         run: |
           set -euo pipefail
           if [ "$DRY_RUN" != "true" ] && { [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; }; then
@@ -199,4 +205,5 @@ jobs:
             --repository-url "$REPOSITORY_URL" \
             --deploy-latest "$DEPLOY_LATEST" \
             --deploy-versioned "$DEPLOY_VERSIONED" \
-            --dry-run "$DRY_RUN"
+            --dry-run "$DRY_RUN" \
+            --key-prefix "$KEY_PREFIX"
