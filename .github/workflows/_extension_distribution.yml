@@ -65,16 +65,6 @@ on:
         required: false
         type: string
         default: ""
-      # Override the default vcpkg repository
-      vcpkg_url:
-        required: false
-        type: string
-        default: "https://github.com/microsoft/vcpkg.git"
-      # Override the default vcpkg commit used by this version of DuckDB
-      vcpkg_commit:
-        required: false
-        type: string
-        default: "cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3" # Release 2026.06.24
       # Override the vcpkg binary sources config. By default, we use the public (read-only) cache from duckdb.
       vcpkg_binary_sources:
         required: false
@@ -247,8 +237,9 @@ env:
   CI_HAS_RUST: ${{ inputs.enable_rust || contains(format(';{0};', inputs.extra_toolchains), ';rust;') }}
   CI_EXTRA_EXTENSION_CONFIG: ${{ inputs.extra_extension_config }}
   CI_VCPKG_EXTRA_DEPENDENCIES: ${{ inputs.vcpkg_extra_dependencies }}
-  CI_VCPKG_URL: ${{ inputs.vcpkg_url }}
-  CI_VCPKG_COMMIT: ${{ inputs.vcpkg_commit }}
+  # Query.Farm: vcpkg is pinned to the commit DuckDB v2.0.0 itself builds with; callers cannot override it.
+  CI_VCPKG_URL: https://github.com/microsoft/vcpkg.git
+  CI_VCPKG_COMMIT: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
   CI_VCPKG_OVERLAY_PORTS: ${{ inputs.vcpkg_overlay_ports }}
   CI_VCPKG_OVERLAY_TRIPLETS: ${{ inputs.vcpkg_overlay_triplets }}
   CI_CUDA_ARCHS: ${{ inputs.cuda_archs }}
@@ -677,8 +668,8 @@ jobs:
       - name: Setup / Vcpkg
         uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11.6
         with:
-          vcpkgGitCommitId: ${{ inputs.vcpkg_commit }}
-          vcpkgGitURL: ${{ inputs.vcpkg_url }}
+          vcpkgGitCommitId: ${{ env.CI_VCPKG_COMMIT }}
+          vcpkgGitURL: ${{ env.CI_VCPKG_URL }}
           vcpkgDirectory: ${{ env.VCPKG_WINDOWS_ROOT }}
 
       - name: Setup

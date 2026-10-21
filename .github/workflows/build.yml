@@ -92,16 +92,6 @@ on:
         required: false
         type: string
         default: "{}"
-      vcpkg_url:
-        description: vcpkg repository
-        required: false
-        type: string
-        default: https://github.com/microsoft/vcpkg.git
-      vcpkg_commit:
-        description: vcpkg commit
-        required: false
-        type: string
-        default: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
       windows_vcpkg_toolchain:
         description: Windows compiler and matching vcpkg toolchain (cl or clang-cl)
         required: false
@@ -134,8 +124,9 @@ env:
   CI_UPLOAD_ALL_EXTENSIONS: true
   CI_SKIP_TESTS: ${{ inputs.skip_tests }}
   CI_EXTENSIONS_TEST_SELECTION: complete
-  CI_VCPKG_URL: ${{ inputs.vcpkg_url }}
-  CI_VCPKG_COMMIT: ${{ inputs.vcpkg_commit }}
+  # Query.Farm: vcpkg is pinned to the commit DuckDB v2.0.0 itself builds with; callers cannot override it.
+  CI_VCPKG_URL: https://github.com/microsoft/vcpkg.git
+  CI_VCPKG_COMMIT: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
   CI_VCPKG_OVERLAY_PORTS: extension-ci-tools/vcpkg_ports
   CI_VCPKG_OVERLAY_TRIPLETS: extension-ci-tools/toolchains
   CI_CUDA_VERSION: 13
@@ -270,7 +261,7 @@ jobs:
         with:
           build: python3 extension-ci-tools/scripts/ci_phase.py build
           test: python3 extension-ci-tools/scripts/ci_phase.py test
-          vcpkg-commit: ${{ inputs.vcpkg_commit }}
+          vcpkg-commit: ${{ env.CI_VCPKG_COMMIT }}
           save-cache: ${{ inputs.save_cache }}
           cache-suffix: ${{ matrix.group_name }}-${{ matrix.container_name || matrix.duckdb_arch }}
       - name: Prepare extension artifact
@@ -360,7 +351,7 @@ jobs:
         with:
           build: python3 extension-ci-tools/scripts/ci_phase.py build
           test: python3 extension-ci-tools/scripts/ci_phase.py test
-          vcpkg-commit: ${{ inputs.vcpkg_commit }}
+          vcpkg-commit: ${{ env.CI_VCPKG_COMMIT }}
           save-cache: ${{ inputs.save_cache }}
           cache-suffix: ${{ matrix.group_name }}-${{ matrix.container_name || matrix.duckdb_arch }}
       - name: Prepare extension artifact
@@ -471,8 +462,8 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11.6
         with:
-          vcpkgGitCommitId: ${{ inputs.vcpkg_commit }}
-          vcpkgGitURL: ${{ inputs.vcpkg_url }}
+          vcpkgGitCommitId: ${{ env.CI_VCPKG_COMMIT }}
+          vcpkgGitURL: ${{ env.CI_VCPKG_URL }}
           vcpkgDirectory: ${{ env.VCPKG_WINDOWS_ROOT }}
       - name: Configure
         run: python extension-ci-tools/scripts/ci_phase.py setup
@@ -481,7 +472,7 @@ jobs:
         with:
           build: python extension-ci-tools/scripts/ci_phase.py build
           test: python extension-ci-tools/scripts/ci_phase.py test
-          vcpkg-commit: ${{ inputs.vcpkg_commit }}
+          vcpkg-commit: ${{ env.CI_VCPKG_COMMIT }}
           save-cache: ${{ inputs.save_cache }}
           cache-suffix: ${{ matrix.group_name }}-${{ matrix.container_name || matrix.duckdb_arch }}
       - name: Prepare extension artifact
@@ -568,7 +559,7 @@ jobs:
         with:
           build: python3 extension-ci-tools/scripts/ci_phase.py build
           test: python3 extension-ci-tools/scripts/ci_phase.py test
-          vcpkg-commit: ${{ inputs.vcpkg_commit }}
+          vcpkg-commit: ${{ env.CI_VCPKG_COMMIT }}
           save-cache: ${{ inputs.save_cache }}
           cache-suffix: ${{ matrix.group_name }}-${{ matrix.container_name || matrix.duckdb_arch }}
       - name: Prepare extension artifact
