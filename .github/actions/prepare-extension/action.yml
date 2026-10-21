@@ -1,0 +1,92 @@
+# Query.Farm: shallow replacement for duckdb/duckdb-ci/prepare-extension.
+#
+# The upstream action checks the extension out with fetch-depth: 0 and
+# submodules: recursive, which drags in the full history of the duckdb engine
+# submodule (hundreds of MB) and of extension-ci-tools, only to check out one
+# commit. This fetches just what a build needs:
+#   - the extension at depth 1 (with tags, for `git describe`),
+#   - its own submodules (not duckdb / extension-ci-tools) at depth 1,
+#   - DuckDB at depth 1 plus the release tag, so DuckDB's version stays exact.
+# extension-ci-tools is checked out by the calling job.
+name: "Prepare extension (shallow)"
+description: "Shallow checkout of the extension and DuckDB"
+inputs:
+  duckdb-ref:
+    description: "Unused; kept for parity with duckdb-ci/prepare-extension"
+    default: ""
+  duckdb-sha:
+    description: "Exact DuckDB commit to check out"
+    required: true
+  duckdb-version:
+    description: "DuckDB version label (e.g. v2.0.0); fetched as a tag when it is one"
+    default: ""
+  duckdb-repository:
+    description: "DuckDB repository (owner/name or URL)"
+    default: "duckdb/duckdb"
+  extension-ref:
+    description: "Ref/branch to check out for the extension"
+    default: ""
+  extension-repository:
+    description: "Extension repository to check out"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout extension
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        repository: ${{ inputs.extension-repository }}
+        ref: ${{ inputs.extension-ref }}
+        fetch-depth: 1
+        fetch-tags: true
+        submodules: false
+    - name: Fetch submodules and DuckDB
+      shell: bash
+      env:
+        DUCKDB_SHA: ${{ inputs.duckdb-sha }}
+        DUCKDB_LABEL: ${{ inputs.duckdb-version }}
+        DUCKDB_REPOSITORY: ${{ inputs.duckdb-repository }}
+      run: |
+        set -euo pipefail
+        git config --global --add safe.directory "$PWD"
+        git config --global --add safe.directory "$PWD/duckdb"
+        git config --global --add safe.directory "$PWD/extension-ci-tools"
+
+        # The extension's own submodules (e.g. vendored libraries), shallow and
+        # recursive; duckdb and extension-ci-tools are handled separately.
+        # No mapfile: macOS runners ship bash 3.2.
+        paths=()
+        if [ -f .gitmodules ]; then
+          while IFS= read -r p; do
+            [ -n "$p" ] && paths+=("$p")
+          done < <(
+            git config --file .gitmodules --get-regexp '^submodule\..*\.path$' \
+              | awk '{print $2}' \
+              | grep -vxE '(.*/)?(duckdb|extension-ci-tools)' || true
+          )
+        fi
+        if [ "${#paths[@]}" -gt 0 ]; then
+          printf 'init submodule: %s\n' "${paths[@]}"
+          git submodule update --init --recursive --depth 1 -- "${paths[@]}"
+        fi
+
+        # Callers may pass an empty string, which overrides the input default.
+        DUCKDB_REPOSITORY="${DUCKDB_REPOSITORY:-duckdb/duckdb}"
+        case "$DUCKDB_REPOSITORY" in
+          *://*|git@*) url="$DUCKDB_REPOSITORY" ;;
+          *) url="https://github.com/${DUCKDB_REPOSITORY}.git" ;;
+        esac
+        rm -rf duckdb
+        git init -q duckdb
+        git -C duckdb remote add origin "$url"
+        git -C duckdb fetch -q --depth 1 origin "$DUCKDB_SHA"
+        # DuckDB derives its version from `git describe`: fetch the release tag so
+        # a release build reports exactly that version. For a non-tag label, fetch
+        # the commit graph without blobs so describe can still find the last tag.
+        if [ -n "$DUCKDB_LABEL" ] && git -C duckdb ls-remote --exit-code --tags origin "refs/tags/$DUCKDB_LABEL" >/dev/null; then
+          git -C duckdb fetch -q --depth 1 origin "refs/tags/$DUCKDB_LABEL:refs/tags/$DUCKDB_LABEL"
+        else
+          git -C duckdb fetch -q --unshallow --filter=blob:none --tags origin "$DUCKDB_SHA"
+        fi
+        git -C duckdb -c advice.detachedHead=false checkout -q "$DUCKDB_SHA"
+        echo "DuckDB $(git -C duckdb describe --tags --long 2>/dev/null || echo "no tag") ($(git -C duckdb rev-parse --short=10 HEAD))"

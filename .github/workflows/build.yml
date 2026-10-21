@@ -276,13 +276,14 @@ jobs:
       CI_PREBUILT_DUCKDB_PATH: ${{ github.workspace }}/.ci/prebuilt-duckdb/${{ matrix.duckdb_arch }}
     steps:
       - name: Prepare sources
-        uses: &duckdb-ci-prepare-extension duckdb/duckdb-ci/prepare-extension@46370d44f2162edd523c8e0d35902967c2817152 # main
+        uses: &duckdb-ci-prepare-extension Query-farm/extension-ci-tools/.github/actions/prepare-extension@query-farm # Query.Farm: shallow checkout
         with:
           extension-repository: ${{ inputs.extension_repository != '' && inputs.extension_repository || github.repository }}
           extension-ref: ${{ inputs.extension_ref }}
           duckdb-repository: ${{ inputs.duckdb_repository }}
           duckdb-ref: ${{ needs.matrix.outputs.duckdb_commit }}
           duckdb-sha: ${{ needs.matrix.outputs.duckdb_commit }}
+          duckdb-version: ${{ needs.matrix.outputs.duckdb_version }}
       - name: Checkout extension-ci-tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -438,6 +439,7 @@ jobs:
           duckdb-repository: ${{ inputs.duckdb_repository != '' && inputs.duckdb_repository || 'duckdb/duckdb' }}
           duckdb-ref: ${{ needs.matrix.outputs.duckdb_commit }}
           duckdb-sha: ${{ needs.matrix.outputs.duckdb_commit }}
+          duckdb-version: ${{ needs.matrix.outputs.duckdb_version }}
       - name: Checkout extension-ci-tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -543,6 +545,7 @@ jobs:
           duckdb-repository: ${{ inputs.duckdb_repository != '' && inputs.duckdb_repository || 'duckdb/duckdb' }}
           duckdb-ref: ${{ needs.matrix.outputs.duckdb_commit }}
           duckdb-sha: ${{ needs.matrix.outputs.duckdb_commit }}
+          duckdb-version: ${{ needs.matrix.outputs.duckdb_version }}
       - name: Checkout extension-ci-tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -664,6 +667,7 @@ jobs:
           duckdb-repository: ${{ inputs.duckdb_repository != '' && inputs.duckdb_repository || 'duckdb/duckdb' }}
           duckdb-ref: ${{ needs.matrix.outputs.duckdb_commit }}
           duckdb-sha: ${{ needs.matrix.outputs.duckdb_commit }}
+          duckdb-version: ${{ needs.matrix.outputs.duckdb_version }}
       - name: Checkout extension-ci-tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -787,6 +791,7 @@ jobs:
           duckdb-repository: ${{ inputs.duckdb_repository != '' && inputs.duckdb_repository || 'duckdb/duckdb' }}
           duckdb-ref: ${{ needs.matrix.outputs.duckdb_commit }}
           duckdb-sha: ${{ needs.matrix.outputs.duckdb_commit }}
+          duckdb-version: ${{ needs.matrix.outputs.duckdb_version }}
       - name: Checkout extension-ci-tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -832,6 +837,7 @@ jobs:
           duckdb-repository: ${{ inputs.duckdb_repository != '' && inputs.duckdb_repository || 'duckdb/duckdb' }}
           duckdb-ref: ${{ needs.matrix.outputs.duckdb_commit }}
           duckdb-sha: ${{ needs.matrix.outputs.duckdb_commit }}
+          duckdb-version: ${{ needs.matrix.outputs.duckdb_version }}
       - name: Checkout extension-ci-tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -889,6 +895,7 @@ jobs:
           duckdb-repository: ${{ inputs.duckdb_repository != '' && inputs.duckdb_repository || 'duckdb/duckdb' }}
           duckdb-ref: ${{ needs.matrix.outputs.duckdb_commit }}
           duckdb-sha: ${{ needs.matrix.outputs.duckdb_commit }}
+          duckdb-version: ${{ needs.matrix.outputs.duckdb_version }}
       - name: Checkout extension-ci-tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
