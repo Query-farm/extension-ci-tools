@@ -471,8 +471,33 @@ class PhaseRunner:
             },
         )
 
+    def align_command_line_tools_sdk(self) -> None:
+        # Query.Farm: Corrosion (Rust extensions) hardcodes the Command Line Tools SDK
+        # (/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib) as a link directory.
+        # On macos-26 runners that SDK (27.0) is newer than the active Xcode's linker, which then
+        # fails with "tapi error: malformed file ... unknown architecture" on libSystem.tbd.
+        # Point the CLT SDK symlink at the SDK of the active toolchain so both agree.
+        clt_sdk = Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
+        if not clt_sdk.parent.is_dir():
+            return
+        result = subprocess.run(
+            ["xcrun", "--sdk", "macosx", "--show-sdk-path"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        active_sdk = result.stdout.strip()
+        if result.returncode != 0 or not active_sdk or not Path(active_sdk).is_dir():
+            print("Warning: could not determine the active macOS SDK; leaving the CLT SDK as is")
+            return
+        if clt_sdk.exists() and clt_sdk.resolve() == Path(active_sdk).resolve():
+            return
+        print(f"Pointing {clt_sdk} ({clt_sdk.resolve()}) at the active SDK {active_sdk}")
+        self.run(["sudo", "ln", "-sfn", active_sdk, str(clt_sdk)])
+
     def setup_macos(self) -> None:
         self.run(["brew", "install", "ninja", "autoconf", "make", "libtool", "automake", "autoconf-archive"])
+        self.align_command_line_tools_sdk()
         self.install_vcpkg()
         tools = self.value("CI_EXTRA_TOOLCHAINS")
         osx_arch = self.value("CI_OSX_BUILD_ARCH")
