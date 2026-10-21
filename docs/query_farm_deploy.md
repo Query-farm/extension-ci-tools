@@ -117,11 +117,12 @@ Query.Farm differences from upstream:
   prebuilt DuckDB carries a pre-release label (e.g. `v2.0.0-alpha49307`) into the extension footer.
 - Remote ccache (`ccache_remote_token` secret, `ccache_remote_url` input) with the pinned ccache
   from `scripts/setup_ccache.sh`, per-run ccache statistics, stable emsdk paths for wasm.
-- vcpkg binary cache (`scripts/setup_vcpkg_cache.sh`): vcpkg's http provider against
-  `vcpkg_remote_url` (the Query.Farm R2 cache, shared by all repositories), read anonymously
-  and written with `ccache_remote_token`. Without the token, a files cache in the GitHub Actions
-  cache is used as well, saved only when new packages were built. duckdb-ci's own per-run vcpkg
-  cache save is disabled.
+- vcpkg binary cache (`scripts/setup_vcpkg_cache.sh`): DuckDB's public read-only cache
+  (`vcpkg_public_cache_url`, as in the legacy pipeline) first, then a files cache kept in the
+  GitHub Actions cache (key `qf-vcpkg-v1-<os>-<group>-<image or arch>-<vcpkg commit>-<run>`,
+  restored by prefix, saved only when the build produced new packages). duckdb-ci's own
+  per-run vcpkg cache save is disabled. An optional writable http cache (`vcpkg_remote_url`,
+  written with `ccache_remote_token`) replaces the GitHub cache when set; it is off by default.
 - `test_config` input (test environment variables).
 - Tests run in each build job; the separate artifact test jobs are opt-in (`test_jobs: true`).
 - Artifacts are named `<group>-extensions-<arch>` and contain an extension repository tree.

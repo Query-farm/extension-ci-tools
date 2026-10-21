@@ -119,14 +119,19 @@ on:
         required: false
         type: string
         default: https://haybarn-vcpkg-cache.rusty-bb6.workers.dev/ccache
-      vcpkg_remote_url:
-        description: Query.Farm vcpkg binary cache (vcpkg http provider); read anonymously, written when ccache_remote_token is set. Empty uses only the GitHub Actions cache
+      vcpkg_public_cache_url:
+        description: Read-only vcpkg http binary cache consulted first (DuckDB's public cache, as in the legacy pipeline); empty disables it
         required: false
         type: string
-        default: https://haybarn-vcpkg-cache.rusty-bb6.workers.dev
+        default: https://vcpkg-cache.duckdb.org
+      vcpkg_remote_url:
+        description: Optional writable vcpkg http binary cache (read anonymously, written when ccache_remote_token is set, replacing the GitHub Actions cache). Empty (default) uses the GitHub Actions cache for packages the public cache lacks
+        required: false
+        type: string
+        default: ""
     secrets:
-      # Query.Farm: bearer token for the remote ccache and vcpkg binary cache. Without it
-      # (forks, PRs from forks) builds read the remote vcpkg cache and use the GitHub cache.
+      # Query.Farm: bearer token for the remote ccache (and the optional writable vcpkg cache).
+      # Without it (forks, PRs from forks) only the GitHub Actions caches are used.
       ccache_remote_token:
         required: false
       VCPKG_CACHING_AWS_ACCESS_KEY_ID:
@@ -323,6 +328,7 @@ jobs:
         id: vcpkg-cache-config
         shell: bash
         env:
+          VCPKG_PUBLIC_CACHE_URL: ${{ inputs.vcpkg_public_cache_url }}
           VCPKG_REMOTE_URL: ${{ inputs.vcpkg_remote_url }}
           VCPKG_REMOTE_TOKEN: ${{ secrets.ccache_remote_token }}
         run: bash extension-ci-tools/scripts/setup_vcpkg_cache.sh
