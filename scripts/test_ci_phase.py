@@ -193,6 +193,20 @@ class CIPhaseTest(unittest.TestCase):
             self.assertIn("DUCKDB_VERSION=v2.0.0-alpha39940\n", docker_environment)
             self.assertIn(f"DUCKDB_COMMIT={commit}\n", docker_environment)
 
+    def test_query_farm_vcpkg_binary_sources_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.environment(directory)
+            env["VCPKG_BINARY_SOURCES"] = "clear;files,/w/vcpkg-cache,readwrite"
+            self.assertEqual(
+                RecordingRunner(env).env["VCPKG_BINARY_SOURCES"],
+                "clear;files,/w/vcpkg-cache,readwrite",
+            )
+            env["CI_VCPKG_BINARY_SOURCES"] = "clear;http,https://cache.example,read"
+            self.assertEqual(
+                RecordingRunner(env).env["VCPKG_BINARY_SOURCES"],
+                "clear;http,https://cache.example,read",
+            )
+
     def test_duckdb_ref_falls_back_to_version(self):
         with tempfile.TemporaryDirectory() as directory:
             runner = RecordingRunner(self.environment(directory))

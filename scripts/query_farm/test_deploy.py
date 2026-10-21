@@ -119,6 +119,18 @@ class PrepareTest(unittest.TestCase):
         suffix = ".duckdb_extension.wasm" if arch.startswith("wasm") else ".duckdb_extension"
         (directory / f"{name}{suffix}").write_bytes(data)
 
+    def add_build_artifact(self, arch, data, name="quack", version="v2.0.0", group="main", others=()):
+        """build.yml layout: <group>-extensions-<arch>/<version>/<arch>/<name>.duckdb_extension + test-support."""
+        directory = self.artifacts / f"{group}-extensions-{arch}"
+        suffix = ".duckdb_extension.wasm" if arch.startswith("wasm") else ".duckdb_extension"
+        for extension in (name, *others):
+            target = directory / version / arch / f"{extension}{suffix}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        support = directory / "test-support" / "0123456789abcdef"
+        support.mkdir(parents=True)
+        (support / "test-support.tar.gz").write_bytes(b"not an extension")
+
     def well_known(self, *publics):
         return {"signature_keys": [p.read_text() for p in publics]}
 
@@ -199,12 +211,41 @@ class PrepareTest(unittest.TestCase):
 
     def test_nothing_found(self):
         self.artifacts.mkdir()
-        with self.assertRaisesRegex(deploy.DeployError, "no artifacts"):
+        with self.assertRaisesRegex(deploy.DeployError, "no quack binaries"):
             self.prepare()
 
     def test_all_excluded(self):
         self.add_artifact("wasm_mvp", make_extension("wasm_mvp"))
         with self.assertRaisesRegex(deploy.DeployError, "excluded"):
+            self.prepare()
+
+    def test_build_yml_artifacts(self):
+        self.add_build_artifact("linux_amd64", make_extension("linux_amd64"), others=("httpfs",))
+        self.add_build_artifact("windows_amd64_mingw", make_extension("windows_amd64_mingw"))
+        self.add_build_artifact("wasm_eh", make_extension("wasm_eh"))
+        # another group of the same build without this extension is ignored
+        (self.artifacts / "rust-extensions-linux_amd64" / "v2.0.0" / "linux_amd64").mkdir(parents=True)
+        found = deploy.discover(self.artifacts, "quack", "v2.0.0")
+        self.assertEqual(sorted(found), ["linux_amd64", "wasm_eh", "windows_amd64_mingw"])
+        self.assertEqual(found["wasm_eh"].name, "quack.duckdb_extension.wasm")
+        results = self.prepare()
+        self.assertEqual([r.arch for r in results], ["linux_amd64", "windows_amd64_mingw"])
+
+    def test_build_yml_wrong_version_directory_refused(self):
+        self.add_build_artifact("linux_amd64", make_extension("linux_amd64", duckdb_version="v2.0.0-alpha49307"),
+                                version="v2.0.0-alpha49307")
+        with self.assertRaisesRegex(deploy.DeployError, "another DuckDB version"):
+            self.prepare()
+
+    def test_build_yml_footer_version_mismatch_refused(self):
+        self.add_build_artifact("linux_amd64", make_extension("linux_amd64", duckdb_version="v2.0.0-alpha49307"))
+        with self.assertRaisesRegex(deploy.DeployError, "footer duckdb_version"):
+            self.prepare()
+
+    def test_duplicate_arch_refused(self):
+        self.add_artifact("linux_amd64", make_extension("linux_amd64"))
+        self.add_build_artifact("linux_amd64", make_extension("linux_amd64"))
+        with self.assertRaisesRegex(deploy.DeployError, "more than one"):
             self.prepare()
 
 

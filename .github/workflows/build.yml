@@ -17,7 +17,7 @@ on:
         description: extension-ci-tools ref used by build and test jobs
         required: false
         type: string
-        default: main
+        default: query-farm
       groups:
         description: YAML extension groups passed to duckdb-ci/matrix
         required: true
@@ -41,7 +41,8 @@ on:
         description: Repository containing extension-ci-tools
         required: false
         type: string
-        default: duckdb/extension-ci-tools
+        # Query.Farm: scripts come from this fork (pair with ci_tools_version: query-farm)
+        default: Query-farm/extension-ci-tools
       exclude_archs:
         description: Semicolon-separated architectures to exclude
         required: false
@@ -83,7 +84,10 @@ on:
         type: boolean
         default: true
       prebuilt_source:
-        description: Prebuilt DuckDB source (workflow, staged, or disabled); defaults to staged unless a legacy artifact is provided
+        # Query.Farm: defaults to disabled (build DuckDB from source). A staged DuckDB archive
+        # reports its own pre-release label (e.g. v2.0.0-alpha49307), which ends up in the
+        # extension footer, so released DuckDB refuses to load the extension.
+        description: Prebuilt DuckDB source (workflow, staged, or disabled); defaults to disabled unless a legacy artifact is provided
         required: false
         type: string
         default: ""
@@ -97,7 +101,26 @@ on:
         required: false
         type: string
         default: cl
+      test_config:
+        description: JSON test configuration (e.g. {"test_env_variables":{"NAME":"value"}})
+        required: false
+        type: string
+        default: "{}"
+      ccache_remote_url:
+        description: Query.Farm HTTPS remote ccache endpoint, used only when the ccache_remote_token secret is set
+        required: false
+        type: string
+        default: https://haybarn-vcpkg-cache.rusty-bb6.workers.dev/ccache
+      vcpkg_remote_url:
+        description: Query.Farm vcpkg binary cache (vcpkg http provider); read anonymously, written when ccache_remote_token is set. Empty uses only the GitHub Actions cache
+        required: false
+        type: string
+        default: https://haybarn-vcpkg-cache.rusty-bb6.workers.dev
     secrets:
+      # Query.Farm: bearer token for the remote ccache and vcpkg binary cache. Without it
+      # (forks, PRs from forks) builds read the remote vcpkg cache and use the GitHub cache.
+      ccache_remote_token:
+        required: false
       VCPKG_CACHING_AWS_ACCESS_KEY_ID:
         required: false
       VCPKG_CACHING_AWS_SECRET_ACCESS_KEY:
@@ -124,6 +147,7 @@ env:
   CI_UPLOAD_ALL_EXTENSIONS: true
   CI_SKIP_TESTS: ${{ inputs.skip_tests }}
   CI_EXTENSIONS_TEST_SELECTION: complete
+  CI_TEST_CONFIG: ${{ inputs.test_config }}
   # Query.Farm: vcpkg is pinned to the commit DuckDB v2.0.0 itself builds with; callers cannot override it.
   CI_VCPKG_URL: https://github.com/microsoft/vcpkg.git
   CI_VCPKG_COMMIT: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
@@ -218,7 +242,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.VCPKG_CACHING_AWS_SECRET_ACCESS_KEY }}
       AWS_ENDPOINT_URL: ${{ secrets.VCPKG_CACHING_AWS_ENDPOINT_URL }}
       AWS_DEFAULT_REGION: ${{ secrets.VCPKG_CACHING_AWS_DEFAULT_REGION }}
-      CI_PREBUILT_DUCKDB_SOURCE: ${{ inputs.prebuilt_source || (fromJSON(inputs.prebuilt_duckdb)[matrix.duckdb_arch] && 'workflow') || 'staged' }}
+      CI_PREBUILT_DUCKDB_SOURCE: ${{ inputs.prebuilt_source || (fromJSON(inputs.prebuilt_duckdb)[matrix.duckdb_arch] && 'workflow') || 'disabled' }}
       CI_PREBUILT_DUCKDB_ARTIFACT: ${{ fromJSON(inputs.prebuilt_duckdb)[matrix.duckdb_arch] || matrix.prebuilt_duckdb_artifact }}
       CI_PREBUILT_DUCKDB_PATH: ${{ github.workspace }}/.ci/prebuilt-duckdb/${{ matrix.duckdb_arch }}
     steps:
@@ -242,6 +266,15 @@ jobs:
         with:
           name: ${{ env.CI_PREBUILT_DUCKDB_ARTIFACT }}
           path: ${{ env.CI_PREBUILT_DUCKDB_PATH }}
+      - &qf-setup-ccache-binaries
+        # Query.Farm: pinned ccache + HTTPS storage helper; enables remote storage when a token is set.
+        name: Setup ccache binaries and remote storage
+        continue-on-error: true
+        shell: bash
+        env:
+          CCACHE_REMOTE_TOKEN: ${{ secrets.ccache_remote_token }}
+          CCACHE_REMOTE_URL: ${{ inputs.ccache_remote_url }}
+        run: bash extension-ci-tools/scripts/setup_ccache.sh
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
         continue-on-error: true
@@ -254,6 +287,39 @@ jobs:
             build-${{ matrix.artifact_name }}-
             ccache-build-${{ matrix.artifact_name }}-
           save: ${{ inputs.save_cache }}
+      - &qf-zero-ccache-stats
+        # Query.Farm: zero counters restored from the GitHub cache so the stats are per run
+        name: Reset ccache statistics
+        continue-on-error: true
+        shell: bash
+        run: ccache -z
+      - &qf-vcpkg-cache-config
+        # Query.Farm: vcpkg binary cache (see scripts/setup_vcpkg_cache.sh); build-duckdb's own cache is disabled.
+        name: Configure vcpkg binary cache
+        id: vcpkg-cache-config
+        shell: bash
+        env:
+          VCPKG_REMOTE_URL: ${{ inputs.vcpkg_remote_url }}
+          VCPKG_REMOTE_TOKEN: ${{ secrets.ccache_remote_token }}
+        run: bash extension-ci-tools/scripts/setup_vcpkg_cache.sh
+      - &qf-vcpkg-cache-restore
+        name: Restore vcpkg binary cache
+        id: vcpkg-cache-restore
+        if: ${{ steps.vcpkg-cache-config.outputs.gha == 'true' }}
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ steps.vcpkg-cache-config.outputs.path }}
+          key: qf-vcpkg-v1-${{ runner.os }}-${{ matrix.group_name }}-${{ matrix.container_name || matrix.duckdb_arch }}-${{ env.CI_VCPKG_COMMIT }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            qf-vcpkg-v1-${{ runner.os }}-${{ matrix.group_name }}-${{ matrix.container_name || matrix.duckdb_arch }}-${{ env.CI_VCPKG_COMMIT }}-
+      - &qf-vcpkg-cache-snapshot
+        name: Snapshot vcpkg binary cache
+        if: ${{ steps.vcpkg-cache-config.outputs.gha == 'true' }}
+        shell: bash
+        run: |
+          cd "${GITHUB_WORKSPACE}/vcpkg-cache"
+          find . -type f | sort > "${RUNNER_TEMP}/qf-vcpkg-cache-before.txt"
+          echo "vcpkg binary cache: $(wc -l < "${RUNNER_TEMP}/qf-vcpkg-cache-before.txt") package(s) restored, $(du -sh . | cut -f1)"
       - name: Configure
         run: python3 extension-ci-tools/scripts/ci_phase.py setup
       - name: Build
@@ -262,8 +328,37 @@ jobs:
           build: python3 extension-ci-tools/scripts/ci_phase.py build
           test: python3 extension-ci-tools/scripts/ci_phase.py test
           vcpkg-commit: ${{ env.CI_VCPKG_COMMIT }}
+          cache: "false"
           save-cache: ${{ inputs.save_cache }}
           cache-suffix: ${{ matrix.group_name }}-${{ matrix.container_name || matrix.duckdb_arch }}
+      - &qf-ccache-stats
+        name: Ccache statistics
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "ccache: $(command -v ccache)"
+          ccache --version | head -n 1
+          echo "Remote ccache enabled: ${CCACHE_REMOTE_ENABLED:-false}"
+          ccache -s -v
+      - &qf-vcpkg-cache-check
+        name: Check vcpkg binary cache for new packages
+        id: vcpkg-cache-check
+        if: ${{ steps.vcpkg-cache-config.outputs.gha == 'true' && inputs.save_cache }}
+        shell: bash
+        run: |
+          cd "${GITHUB_WORKSPACE}/vcpkg-cache"
+          find . -type f | sort > "${RUNNER_TEMP}/qf-vcpkg-cache-after.txt"
+          added="$(comm -13 "${RUNNER_TEMP}/qf-vcpkg-cache-before.txt" "${RUNNER_TEMP}/qf-vcpkg-cache-after.txt" | wc -l | tr -d ' ')"
+          echo "vcpkg binary cache: ${added} new package(s), $(du -sh . | cut -f1) total"
+          echo "changed=$([ "${added}" -gt 0 ] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
+      - &qf-vcpkg-cache-save
+        name: Save vcpkg binary cache
+        if: ${{ steps.vcpkg-cache-check.outputs.changed == 'true' }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ steps.vcpkg-cache-config.outputs.path }}
+          key: ${{ steps.vcpkg-cache-restore.outputs.cache-primary-key }}
       - name: Prepare extension artifact
         id: artifact
         run: python3 extension-ci-tools/scripts/ci_phase.py upload
@@ -301,7 +396,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.VCPKG_CACHING_AWS_SECRET_ACCESS_KEY }}
       AWS_ENDPOINT_URL: ${{ secrets.VCPKG_CACHING_AWS_ENDPOINT_URL }}
       AWS_DEFAULT_REGION: ${{ secrets.VCPKG_CACHING_AWS_DEFAULT_REGION }}
-      CI_PREBUILT_DUCKDB_SOURCE: ${{ inputs.prebuilt_source || (fromJSON(inputs.prebuilt_duckdb)[matrix.duckdb_arch] && 'workflow') || 'staged' }}
+      CI_PREBUILT_DUCKDB_SOURCE: ${{ inputs.prebuilt_source || (fromJSON(inputs.prebuilt_duckdb)[matrix.duckdb_arch] && 'workflow') || 'disabled' }}
       CI_PREBUILT_DUCKDB_ARTIFACT: ${{ fromJSON(inputs.prebuilt_duckdb)[matrix.duckdb_arch] || matrix.prebuilt_duckdb_artifact }}
       CI_PREBUILT_DUCKDB_PATH: ${{ github.workspace }}/.ci/prebuilt-duckdb/${{ matrix.duckdb_arch }}
     steps:
@@ -332,6 +427,7 @@ jobs:
       - name: Setup Rust
         if: ${{ matrix.toolchain == 'rust' }}
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - *qf-setup-ccache-binaries
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
         continue-on-error: true
@@ -344,6 +440,10 @@ jobs:
             build-${{ matrix.artifact_name }}-
             ccache-build-${{ matrix.artifact_name }}-
           save: ${{ inputs.save_cache }}
+      - *qf-zero-ccache-stats
+      - *qf-vcpkg-cache-config
+      - *qf-vcpkg-cache-restore
+      - *qf-vcpkg-cache-snapshot
       - name: Configure
         run: python3 extension-ci-tools/scripts/ci_phase.py setup
       - name: Build
@@ -352,8 +452,12 @@ jobs:
           build: python3 extension-ci-tools/scripts/ci_phase.py build
           test: python3 extension-ci-tools/scripts/ci_phase.py test
           vcpkg-commit: ${{ env.CI_VCPKG_COMMIT }}
+          cache: "false"
           save-cache: ${{ inputs.save_cache }}
           cache-suffix: ${{ matrix.group_name }}-${{ matrix.container_name || matrix.duckdb_arch }}
+      - *qf-ccache-stats
+      - *qf-vcpkg-cache-check
+      - *qf-vcpkg-cache-save
       - name: Prepare extension artifact
         id: artifact
         run: python3 extension-ci-tools/scripts/ci_phase.py upload
@@ -390,7 +494,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.VCPKG_CACHING_AWS_SECRET_ACCESS_KEY }}
       AWS_ENDPOINT_URL: ${{ secrets.VCPKG_CACHING_AWS_ENDPOINT_URL }}
       AWS_DEFAULT_REGION: ${{ secrets.VCPKG_CACHING_AWS_DEFAULT_REGION }}
-      CI_PREBUILT_DUCKDB_SOURCE: ${{ inputs.prebuilt_source || (fromJSON(inputs.prebuilt_duckdb)[matrix.duckdb_arch] && 'workflow') || 'staged' }}
+      CI_PREBUILT_DUCKDB_SOURCE: ${{ inputs.prebuilt_source || (fromJSON(inputs.prebuilt_duckdb)[matrix.duckdb_arch] && 'workflow') || 'disabled' }}
       CI_PREBUILT_DUCKDB_ARTIFACT: ${{ fromJSON(inputs.prebuilt_duckdb)[matrix.duckdb_arch] || matrix.prebuilt_duckdb_artifact }}
       CI_PREBUILT_DUCKDB_PATH: ${{ github.workspace }}/.ci/prebuilt-duckdb/${{ matrix.duckdb_arch }}
       CC: ${{ (matrix.duckdb_arch == 'windows_amd64_rtools' || matrix.duckdb_arch == 'windows_amd64_mingw') && 'gcc' || inputs.windows_vcpkg_toolchain }}
@@ -433,6 +537,7 @@ jobs:
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: x86_64-pc-windows-gnu
+      - *qf-setup-ccache-binaries
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
         with:
@@ -444,6 +549,10 @@ jobs:
             build-${{ matrix.artifact_name }}-
             ccache-build-${{ matrix.artifact_name }}-
           save: ${{ inputs.save_cache }}
+      - *qf-zero-ccache-stats
+      - *qf-vcpkg-cache-config
+      - *qf-vcpkg-cache-restore
+      - *qf-vcpkg-cache-snapshot
       - name: Setup Rtools
         if: ${{ matrix.duckdb_arch == 'windows_amd64_rtools' || matrix.duckdb_arch == 'windows_amd64_mingw' }}
         uses: r-lib/actions/setup-r@d3c5be51b12e724e68f33216ca3c148b66d5f0b6 # v2.12.1
@@ -473,8 +582,12 @@ jobs:
           build: python extension-ci-tools/scripts/ci_phase.py build
           test: python extension-ci-tools/scripts/ci_phase.py test
           vcpkg-commit: ${{ env.CI_VCPKG_COMMIT }}
+          cache: "false"
           save-cache: ${{ inputs.save_cache }}
           cache-suffix: ${{ matrix.group_name }}-${{ matrix.container_name || matrix.duckdb_arch }}
+      - *qf-ccache-stats
+      - *qf-vcpkg-cache-check
+      - *qf-vcpkg-cache-save
       - name: Prepare extension artifact
         id: artifact
         run: python extension-ci-tools/scripts/ci_phase.py upload
@@ -540,6 +653,37 @@ jobs:
         uses: dtolnay/rust-toolchain@4d407b29186a635f0cc27475ef0bc0ae605a8866 # 1.86.0
         with:
           targets: wasm32-unknown-emscripten
+      - *qf-setup-ccache-binaries
+      - name: Setup Emscripten at a stable path
+        # Query.Farm: setup-emsdk activates emsdk from a random $RUNNER_TEMP/<uuid> directory,
+        # which ends up in preprocessed output (sysroot line markers) and defeats ccache across
+        # runs and repositories. Re-activate the identical copy it placed in the fixed-path tool cache.
+        if: ${{ env.CCACHE_REMOTE_ENABLED == 'true' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          shopt -s nullglob
+          roots=("${RUNNER_TOOL_CACHE}"/emsdk/*/*/emsdk-main)
+          if [ "${#roots[@]}" -ne 1 ]; then
+            echo "::warning::expected one emsdk in the tool cache, found ${#roots[@]}; keeping setup-emsdk paths"
+            exit 0
+          fi
+          root="${roots[0]}"
+          version="$(basename "$(dirname "$(dirname "${root}")")")"
+          cd "${root}"
+          ./emsdk activate "${version}"
+          ./emsdk construct_env > "${RUNNER_TEMP}/emsdk_env.log" 2>&1
+          while IFS= read -r line; do
+            case "${line}" in
+              "PATH += "*) echo "${line#PATH += }" >> "${GITHUB_PATH}" ;;
+              PATH\ =*|export\ *) ;;
+              [A-Z]*" = "*) key="${line%% = *}"; [[ "${key}" =~ ^[A-Z_]+$ ]] && echo "${key}=${line#* = }" >> "${GITHUB_ENV}" ;;
+            esac
+          done < "${RUNNER_TEMP}/emsdk_env.log"
+          # The tool-cache copy does not preserve mtimes, so identify the compiler by version.
+          echo "CCACHE_COMPILERCHECK=string:emsdk-${version}" >> "${GITHUB_ENV}"
+          echo "emsdk ${version} activated from ${root}"
+
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
         continue-on-error: true
@@ -552,6 +696,10 @@ jobs:
             build-${{ matrix.artifact_name }}-
             ccache-build-${{ matrix.artifact_name }}-
           save: ${{ inputs.save_cache }}
+      - *qf-zero-ccache-stats
+      - *qf-vcpkg-cache-config
+      - *qf-vcpkg-cache-restore
+      - *qf-vcpkg-cache-snapshot
       - name: Configure
         run: python3 extension-ci-tools/scripts/ci_phase.py setup
       - name: Build
@@ -560,8 +708,12 @@ jobs:
           build: python3 extension-ci-tools/scripts/ci_phase.py build
           test: python3 extension-ci-tools/scripts/ci_phase.py test
           vcpkg-commit: ${{ env.CI_VCPKG_COMMIT }}
+          cache: "false"
           save-cache: ${{ inputs.save_cache }}
           cache-suffix: ${{ matrix.group_name }}-${{ matrix.container_name || matrix.duckdb_arch }}
+      - *qf-ccache-stats
+      - *qf-vcpkg-cache-check
+      - *qf-vcpkg-cache-save
       - name: Prepare extension artifact
         id: artifact
         run: python3 extension-ci-tools/scripts/ci_phase.py upload

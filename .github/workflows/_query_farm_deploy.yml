@@ -1,5 +1,5 @@
 #
-# Query.Farm: sign extension binaries built by _extension_distribution.yml and publish
+# Query.Farm: sign extension binaries built by build.yml or _extension_distribution.yml and publish
 # them to the Query.Farm extension repository (Cloudflare R2, https://duckdb-extensions.query.farm).
 #
 # Call it as a second job after the build, from trusted contexts only:
@@ -25,7 +25,8 @@ on:
       extension_name:
         required: true
         type: string
-      # Must match the duckdb_version given to _extension_distribution.yml (it names the artifacts).
+      # Must match the duckdb_version given to the build workflow (artifact names / repository layout
+      # and the footer check depend on it).
       duckdb_version:
         required: true
         type: string
@@ -139,7 +140,8 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          pattern: ${{ inputs.extension_name }}-${{ inputs.duckdb_version }}-extension-*
+          # _extension_distribution.yml: <name>-<version>-extension-<arch>; build.yml: <group>-extensions-<arch>
+          pattern: "*-extension*-*"
           path: ${{ runner.temp }}/qf-artifacts
 
       - name: Validate, sign and verify

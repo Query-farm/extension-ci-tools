@@ -42,6 +42,7 @@ WELL_KNOWN_PATH = "/.well-known/duckdb-extension-repo.json"
 LATEST_CACHE_CONTROL = "public, max-age=300"
 VERSIONED_CACHE_CONTROL = "public, max-age=31536000, immutable"
 ARTIFACT_MARKER = "-extension-"
+BUILD_ARTIFACT = re.compile(r"(?P<group>[A-Za-z0-9_.-]+)-extensions-(?P<arch>[a-z0-9_]+)")  # used with fullmatch
 
 
 class DeployError(RuntimeError):
@@ -220,33 +221,61 @@ def split_archs(value: str) -> set[str]:
     return {part.strip() for part in re.split(r"[;,\s]+", value or "") if part.strip()}
 
 
+def _single_binary(directory: Path, extension_name: str, label: str) -> Path | None:
+    """The one <name>.duckdb_extension[.wasm] below `directory` (test-support bundles ignored)."""
+    matches = sorted(
+        p
+        for p in directory.rglob(f"{extension_name}.duckdb_extension*")
+        if p.is_file()
+        and p.name in (f"{extension_name}.duckdb_extension", f"{extension_name}.duckdb_extension.wasm")
+        and "test-support" not in p.relative_to(directory).parts
+    )
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise DeployError(
+            f"artifact {label}: expected exactly one {extension_name}.duckdb_extension, found {len(matches)}"
+        )
+    return matches[0]
+
+
 def discover(artifacts_dir: Path, extension_name: str, duckdb_version: str) -> dict[str, Path]:
-    """Map arch -> extension binary for downloaded `<name>-<version>-extension-<arch>` dirs."""
-    prefix = f"{extension_name}-{duckdb_version}{ARTIFACT_MARKER}"
+    """Map arch -> extension binary for the downloaded build artifacts.
+
+    Two layouts are understood:
+      * _extension_distribution.yml: `<name>-<version>-extension-<arch>[.wasm]/<name>.duckdb_extension[.wasm]`
+      * build.yml: `<group>-extensions-<arch>/<version>/<arch>/<name>.duckdb_extension[.wasm]`
+        (an extension repository tree, plus test-support bundles and possibly other extensions)
+    """
+    legacy_prefix = f"{extension_name}-{duckdb_version}{ARTIFACT_MARKER}"
     found: dict[str, Path] = {}
     for directory in sorted(p for p in artifacts_dir.iterdir() if p.is_dir()):
-        if not directory.name.startswith(prefix):
+        if directory.name.startswith(legacy_prefix):
+            arch = directory.name[len(legacy_prefix) :]
+            if arch.endswith(".wasm"):
+                arch = arch[: -len(".wasm")]
+            binary = _single_binary(directory, extension_name, directory.name)
+            if binary is None:
+                raise DeployError(
+                    f"artifact {directory.name}: expected exactly one {extension_name}.duckdb_extension, found 0"
+                )
+        elif BUILD_ARTIFACT.fullmatch(directory.name):
+            arch = BUILD_ARTIFACT.fullmatch(directory.name).group("arch")
+            binary = _single_binary(directory, extension_name, directory.name)
+            if binary is None:  # another extension group of the same build
+                continue
+            expected_parent = Path(duckdb_version) / arch
+            relative = binary.relative_to(directory).parent
+            if relative != expected_parent:
+                raise DeployError(
+                    f"artifact {directory.name}: {extension_name} is at {relative.as_posix()}/, "
+                    f"expected {expected_parent.as_posix()}/ (built for another DuckDB version?)"
+                )
+        else:
             continue
-        arch = directory.name[len(prefix) :]
-        if arch.endswith(".wasm"):
-            arch = arch[: -len(".wasm")]
-        candidates = [
-            directory / f"{extension_name}.duckdb_extension",
-            directory / f"{extension_name}.duckdb_extension.wasm",
-        ]
-        matches = [c for c in candidates if c.is_file()]
-        if not matches:
-            matches = sorted(
-                p
-                for p in directory.rglob(f"{extension_name}.duckdb_extension*")
-                if p.is_file() and p.name.endswith((".duckdb_extension", ".duckdb_extension.wasm"))
-            )
-        if len(matches) != 1:
-            raise DeployError(
-                f"artifact {directory.name}: expected exactly one {extension_name}.duckdb_extension, "
-                f"found {len(matches)}"
-            )
-        found[arch] = matches[0]
+        if arch in found:
+            raise DeployError(f"more than one artifact provides {extension_name} for {arch}")
+        found[arch] = binary
     return found
 
 
@@ -330,7 +359,8 @@ def prepare(
     binaries = discover(artifacts_dir, extension_name, duckdb_version)
     if not binaries:
         raise DeployError(
-            f"no artifacts named {extension_name}-{duckdb_version}-extension-<arch> in {artifacts_dir}"
+            f"no {extension_name} binaries in {artifacts_dir} (expected artifacts named "
+            f"{extension_name}-{duckdb_version}-extension-<arch> or <group>-extensions-<arch>)"
         )
     selected = {arch: path for arch, path in binaries.items() if arch not in exclude_archs}
     skipped = sorted(set(binaries) - set(selected))

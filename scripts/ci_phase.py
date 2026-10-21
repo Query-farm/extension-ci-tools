@@ -124,6 +124,12 @@ def extra_dependencies(config: str, architecture: str) -> list[str]:
 class PhaseRunner:
     def __init__(self, environ: Mapping[str, str] | None = None) -> None:
         self.env = dict(os.environ if environ is None else environ)
+        # Query.Farm: build.yml chooses the vcpkg binary cache itself
+        # (scripts/setup_vcpkg_cache.sh); it takes precedence over the files cache
+        # that duckdb-ci/build-duckdb writes to VCPKG_BINARY_SOURCES.
+        binary_sources = self.env.get("CI_VCPKG_BINARY_SOURCES")
+        if binary_sources:
+            self.env["VCPKG_BINARY_SOURCES"] = binary_sources
         self.platform = self.required("CI_PLATFORM")
         self.architecture = self.required("DUCKDB_PLATFORM")
         self.workspace = Path(self.env.get("GITHUB_WORKSPACE", ".")).resolve()
