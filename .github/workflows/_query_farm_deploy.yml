@@ -1,0 +1,202 @@
+#
+# Query.Farm: sign extension binaries built by _extension_distribution.yml and publish
+# them to the Query.Farm extension repository (Cloudflare R2, https://duckdb-extensions.query.farm).
+#
+# Call it as a second job after the build, from trusted contexts only:
+#
+#   duckdb-deploy:
+#     needs: duckdb-stable-build
+#     if: github.event_name != 'pull_request'
+#     uses: Query-farm/extension-ci-tools/.github/workflows/_query_farm_deploy.yml@query-farm
+#     with:
+#       extension_name: <name>
+#       duckdb_version: v2.0.0
+#     secrets:
+#       signing_key: ${{ secrets.QUERY_FARM_EXTENSION_SIGNING_KEY }}
+#       r2_access_key_id: ${{ secrets.QUERY_FARM_R2_ACCESS_KEY_ID }}
+#       r2_secret_access_key: ${{ secrets.QUERY_FARM_R2_SECRET_ACCESS_KEY }}
+#
+# See docs/query_farm_deploy.md.
+#
+name: Query.Farm Extension Deploy
+on:
+  workflow_call:
+    inputs:
+      extension_name:
+        required: true
+        type: string
+      # Must match the duckdb_version given to _extension_distribution.yml (it names the artifacts).
+      duckdb_version:
+        required: true
+        type: string
+      # ';' separated architectures not to publish. DuckDB-Wasm repository support is unverified.
+      exclude_archs:
+        required: false
+        type: string
+        default: "wasm_mvp;wasm_eh;wasm_threads"
+      # Upload to <duckdb_version>/<platform>/<name>.duckdb_extension.gz (what INSTALL fetches).
+      deploy_latest:
+        required: false
+        type: boolean
+        default: true
+      # Upload to <name>/<extension_version>/<duckdb_version>/<platform>/<name>.duckdb_extension.gz.
+      deploy_versioned:
+        required: false
+        type: boolean
+        default: true
+      # Sign and verify everything, list what would be uploaded, upload nothing.
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+      # Skip (with a notice) unless duckdb_version is a release label like v2.0.0. Set false only for testing.
+      require_release_label:
+        required: false
+        type: boolean
+        default: true
+      repository_url:
+        required: false
+        type: string
+        default: "https://duckdb-extensions.query.farm"
+      r2_bucket:
+        required: false
+        type: string
+        default: "query-farm-duckdb-extensions"
+      r2_account_id:
+        required: false
+        type: string
+        default: "bb68a133a66d26a310231495b13479a1"
+      # The extension-ci-tools ref/repository providing scripts/query_farm/deploy.py.
+      ci_tools_version:
+        required: false
+        type: string
+        default: "query-farm"
+      override_ci_tools_repository:
+        required: false
+        type: string
+        default: "Query-farm/extension-ci-tools"
+    secrets:
+      signing_key:
+        description: PEM RSA private key (QUERY_FARM_EXTENSION_SIGNING_KEY)
+        required: true
+      r2_access_key_id:
+        description: R2 access key id (optional when dry_run)
+        required: false
+      r2_secret_access_key:
+        description: R2 secret access key (optional when dry_run)
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check deploy context
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.context.outputs.proceed }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: extension-ci-tools
+          ref: ${{ inputs.ci_tools_version }}
+          repository: ${{ inputs.override_ci_tools_repository }}
+          persist-credentials: false
+
+      - id: context
+        name: Refuse untrusted events and pre-release DuckDB labels
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DUCKDB_VERSION: ${{ inputs.duckdb_version }}
+          REQUIRE_RELEASE_LABEL: ${{ inputs.require_release_label }}
+        run: |
+          python3 extension-ci-tools/scripts/query_farm/deploy.py check-context \
+            --event-name "$EVENT_NAME" \
+            --duckdb-version "$DUCKDB_VERSION" \
+            --require-release-label "$REQUIRE_RELEASE_LABEL"
+
+  deploy:
+    name: Sign and publish ${{ inputs.extension_name }}
+    runs-on: ubuntu-latest
+    needs: check
+    if: needs.check.outputs.proceed == 'true'
+    concurrency:
+      group: query-farm-deploy-${{ inputs.extension_name }}-${{ inputs.duckdb_version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: extension-ci-tools
+          ref: ${{ inputs.ci_tools_version }}
+          repository: ${{ inputs.override_ci_tools_repository }}
+          persist-credentials: false
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: ${{ inputs.extension_name }}-${{ inputs.duckdb_version }}-extension-*
+          path: ${{ runner.temp }}/qf-artifacts
+
+      - name: Validate, sign and verify
+        env:
+          SIGNING_KEY: ${{ secrets.signing_key }}
+          EXTENSION_NAME: ${{ inputs.extension_name }}
+          DUCKDB_VERSION: ${{ inputs.duckdb_version }}
+          EXCLUDE_ARCHS: ${{ inputs.exclude_archs }}
+          REPOSITORY_URL: ${{ inputs.repository_url }}
+          REQUIRE_RELEASE_LABEL: ${{ inputs.require_release_label }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error title=Query.Farm deploy::the signing_key secret is empty (pass secrets.QUERY_FARM_EXTENSION_SIGNING_KEY)"
+            exit 1
+          fi
+          key_file="$(umask 077 && mktemp "$RUNNER_TEMP/qf-signing-key.XXXXXX")"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$key_file"
+          unset SIGNING_KEY
+          python3 extension-ci-tools/scripts/query_farm/deploy.py prepare \
+            --artifacts-dir "$RUNNER_TEMP/qf-artifacts" \
+            --out-dir "$RUNNER_TEMP/qf-signed" \
+            --extension-name "$EXTENSION_NAME" \
+            --duckdb-version "$DUCKDB_VERSION" \
+            --exclude-archs "$EXCLUDE_ARCHS" \
+            --signing-key "$key_file" \
+            --repository-url "$REPOSITORY_URL" \
+            --require-release-label "$REQUIRE_RELEASE_LABEL"
+
+      - name: Upload signed files as a workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.extension_name }}-${{ inputs.duckdb_version }}-signed
+          path: ${{ runner.temp }}/qf-signed
+          if-no-files-found: error
+
+      - name: Publish to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.r2_access_key_id }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.r2_secret_access_key }}
+          AWS_DEFAULT_REGION: auto
+          # R2 rejects some of the newer default AWS CLI integrity checksums.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ENDPOINT: https://${{ inputs.r2_account_id }}.r2.cloudflarestorage.com
+          R2_BUCKET: ${{ inputs.r2_bucket }}
+          REPOSITORY_URL: ${{ inputs.repository_url }}
+          DEPLOY_LATEST: ${{ inputs.deploy_latest }}
+          DEPLOY_VERSIONED: ${{ inputs.deploy_versioned }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" != "true" ] && { [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; }; then
+            echo "::error title=Query.Farm deploy::R2 credentials missing; pass r2_access_key_id and r2_secret_access_key or set dry_run: true"
+            exit 1
+          fi
+          python3 extension-ci-tools/scripts/query_farm/deploy.py upload \
+            --out-dir "$RUNNER_TEMP/qf-signed" \
+            --bucket "$R2_BUCKET" \
+            --endpoint "$R2_ENDPOINT" \
+            --repository-url "$REPOSITORY_URL" \
+            --deploy-latest "$DEPLOY_LATEST" \
+            --deploy-versioned "$DEPLOY_VERSIONED" \
+            --dry-run "$DRY_RUN"
