@@ -177,6 +177,25 @@ class PrepareTest(unittest.TestCase):
             deploy.upload(self.out, "bucket", "https://example.invalid", "https://repo.example", True, False, True)
         self.assertIn("DRY RUN", out.getvalue())
 
+    @unittest.skipUnless(shutil.which("brotli"), "brotli not available")
+    def test_wasm_is_brotli_at_the_path_duckdb_wasm_requests(self):
+        self.add_artifact("linux_amd64", make_extension("linux_amd64"))
+        self.add_artifact("wasm_eh", make_extension("wasm_eh"))
+        results = {r.arch: r for r in self.prepare(exclude="")}
+        self.assertEqual(results["wasm_eh"].file, "wasm_eh/quack.duckdb_extension.wasm")
+        self.assertEqual(results["linux_amd64"].file, "linux_amd64/quack.duckdb_extension.gz")
+        compressed = (self.out / results["wasm_eh"].file).read_bytes()
+        self.assertEqual(hashlib.sha256(compressed).hexdigest(), results["wasm_eh"].compressed_sha256)
+        signed = deploy._brotli(["-d", "-c"], compressed)
+        self.assertEqual(hashlib.sha256(signed).hexdigest(), results["wasm_eh"].signed_sha256)
+        with tempfile.TemporaryDirectory() as work:
+            self.assertTrue(deploy.verify_extension(signed, self.public, Path(work)))
+        manifest = json.loads((self.out / "manifest.json").read_text())
+        keys = [p["key"] for p in deploy.object_plan(manifest, True, True)]
+        self.assertIn("quack/abc123/v2.0.0/wasm_eh/quack.duckdb_extension.wasm", keys)
+        self.assertIn("v2.0.0/wasm_eh/quack.duckdb_extension.wasm", keys)
+        self.assertIn("v2.0.0/linux_amd64/quack.duckdb_extension.gz", keys)
+
     def test_platform_mismatch_refused(self):
         self.add_artifact("linux_arm64", make_extension("linux_amd64"))
         with self.assertRaisesRegex(deploy.DeployError, "footer platform"):

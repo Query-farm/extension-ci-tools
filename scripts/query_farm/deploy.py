@@ -4,7 +4,8 @@
 Used by .github/workflows/_query_farm_deploy.yml. Subcommands:
 
   check-context  decide whether this run may deploy (event + release label)
-  prepare        validate footers, sign, verify against the published keys, gzip
+  prepare        validate footers, sign, verify against the published keys, compress
+                 (gzip natively, brotli for wasm, as DuckDB's own repository does)
   upload         upload the prepared files to R2 (or list them in dry-run mode)
 
 Signing mirrors DuckDB's scripts/extension-upload-single.sh: the trailing
@@ -20,6 +21,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import io
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -41,6 +43,8 @@ SAFE_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")  # used with fullmatch
 WELL_KNOWN_PATH = "/.well-known/duckdb-extension-repo.json"
 LATEST_CACHE_CONTROL = "public, max-age=300"
 VERSIONED_CACHE_CONTROL = "public, max-age=31536000, immutable"
+WASM_CONTENT_TYPE = "application/wasm"
+NATIVE_CONTENT_TYPE = "application/octet-stream"
 ARTIFACT_MARKER = "-extension-"
 BUILD_ARTIFACT = re.compile(r"(?P<group>[A-Za-z0-9_.-]+)-extensions-(?P<arch>[a-z0-9_]+)")  # used with fullmatch
 
@@ -217,6 +221,36 @@ def fetch_well_known(repository_url: str) -> dict:
 # --------------------------------------------------------------------------
 
 
+def is_wasm(arch: str) -> bool:
+    return arch.startswith("wasm")
+
+
+def published_filename(extension_name: str, arch: str) -> str:
+    """The object name DuckDB requests: `.wasm` from DuckDB-Wasm, `.gz` from everything else."""
+    return f"{extension_name}.duckdb_extension.{'wasm' if is_wasm(arch) else 'gz'}"
+
+
+def compress_gzip(data: bytes) -> bytes:
+    raw = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0) as gz:
+        gz.write(data)
+    return raw.getvalue()
+
+
+def _brotli(args: list[str], data: bytes) -> bytes:
+    try:
+        result = subprocess.run(["brotli", *args], input=data, capture_output=True, check=False)
+    except FileNotFoundError as error:
+        raise DeployError("brotli is not on PATH; it is required to publish wasm extensions") from error
+    if result.returncode != 0:
+        raise DeployError(f"brotli {' '.join(args)} failed: {result.stderr.decode(errors='replace').strip()[:500]}")
+    return result.stdout
+
+
+def compress_brotli(data: bytes) -> bytes:
+    return _brotli(["-c", "-q", "11"], data)
+
+
 def split_archs(value: str) -> set[str]:
     return {part.strip() for part in re.split(r"[;,\s]+", value or "") if part.strip()}
 
@@ -332,11 +366,11 @@ class Prepared:
     arch: str
     extension_version: str
     abi_type: str
-    file: str  # gzip file, relative to the output dir
+    file: str  # compressed file, relative to the output dir
     signed_sha256: str
     signed_size: int
-    gz_sha256: str
-    gz_size: int
+    compressed_sha256: str
+    compressed_size: int
     key_fingerprint: str
 
 
@@ -426,15 +460,18 @@ def prepare(
                 raise DeployError(f"[{arch}] signature does not verify against published key {match.fingerprint}")
             print(f"[{arch}] signed and verified against published key {match.fingerprint}")
 
-            relative = Path(arch) / f"{extension_name}.duckdb_extension.gz"
+            relative = Path(arch) / published_filename(extension_name, arch)
             target = out_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            with open(target, "wb") as raw:
-                with gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0) as gz:
-                    gz.write(signed)
-            compressed = target.read_bytes()
-            if gzip.decompress(compressed) != signed:
-                raise DeployError(f"[{arch}] gzip round-trip mismatch")
+            if is_wasm(arch):
+                compressed = compress_brotli(signed)
+                restored = _brotli(["-d", "-c"], compressed)
+            else:
+                compressed = compress_gzip(signed)
+                restored = gzip.decompress(compressed)
+            if restored != signed:
+                raise DeployError(f"[{arch}] compression round-trip mismatch")
+            target.write_bytes(compressed)
             results.append(
                 Prepared(
                     arch=arch,
@@ -443,8 +480,8 @@ def prepare(
                     file=relative.as_posix(),
                     signed_sha256=hashlib.sha256(signed).hexdigest(),
                     signed_size=len(signed),
-                    gz_sha256=hashlib.sha256(compressed).hexdigest(),
-                    gz_size=len(compressed),
+                    compressed_sha256=hashlib.sha256(compressed).hexdigest(),
+                    compressed_size=len(compressed),
                     key_fingerprint=match.fingerprint,
                 )
             )
@@ -476,7 +513,7 @@ def object_plan(manifest: dict, deploy_latest: bool, deploy_versioned: bool, key
     duckdb_version = manifest["duckdb_version"]
     plan = []
     for entry in manifest["files"]:
-        filename = f"{name}.duckdb_extension.gz"
+        filename = published_filename(name, entry["arch"])
         if deploy_versioned:
             plan.append(
                 {
@@ -508,31 +545,38 @@ def verify_uploaded(item: dict, bucket: str, endpoint: str, repository_url: str)
     if head.returncode != 0:
         raise DeployError(f"head-object {item['key']} failed: {head.stderr.strip()[:500]}")
     meta = json.loads(head.stdout)
+    wasm = is_wasm(item["arch"])
+    expected_type = WASM_CONTENT_TYPE if wasm else NATIVE_CONTENT_TYPE
+    expected_encoding = "br" if wasm else None
     problems = []
-    if meta.get("ContentLength") != item["gz_size"]:
-        problems.append(f"size {meta.get('ContentLength')} != {item['gz_size']}")
-    if meta.get("ContentType") != "application/octet-stream":
+    if meta.get("ContentLength") != item["compressed_size"]:
+        problems.append(f"size {meta.get('ContentLength')} != {item['compressed_size']}")
+    if meta.get("ContentType") != expected_type:
         problems.append(f"content-type {meta.get('ContentType')!r}")
-    if meta.get("ContentEncoding"):
-        problems.append(f"unexpected content-encoding {meta.get('ContentEncoding')!r}")
+    if (meta.get("ContentEncoding") or None) != expected_encoding:
+        problems.append(f"content-encoding {meta.get('ContentEncoding')!r}, expected {expected_encoding!r}")
     if meta.get("CacheControl") != item["cache_control"]:
         problems.append(f"cache-control {meta.get('CacheControl')!r}")
-    if meta.get("Metadata", {}).get("sha256") != item["gz_sha256"]:
+    if meta.get("Metadata", {}).get("sha256") != item["compressed_sha256"]:
         problems.append("sha256 metadata mismatch")
     # Query string sidesteps any cached copy of a previous upload at the same URL.
-    url = f"{repository_url.rstrip('/')}/{item['key']}?verify={item['gz_sha256'][:16]}"
+    url = f"{repository_url.rstrip('/')}/{item['key']}?verify={item['compressed_sha256'][:16]}"
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "query-farm-extension-deploy"})
+        headers = {"User-Agent": "query-farm-extension-deploy"}
+        if wasm:
+            # Advertise br, or the CDN may decompress and the bytes would not match the stored object.
+            headers["Accept-Encoding"] = "br"
+        request = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(request, timeout=120) as response:
             body = response.read()
             encoding = response.headers.get("Content-Encoding")
     except Exception as error:  # noqa: BLE001
         raise DeployError(f"could not fetch {url}: {error}") from error
     public_sha = hashlib.sha256(body).hexdigest()
-    if public_sha != item["gz_sha256"]:
-        problems.append(f"public URL sha256 {public_sha} != {item['gz_sha256']}")
-    if encoding:
-        problems.append(f"public URL served Content-Encoding {encoding!r}")
+    if public_sha != item["compressed_sha256"]:
+        problems.append(f"public URL sha256 {public_sha} != {item['compressed_sha256']}")
+    if (encoding or None) != expected_encoding:
+        problems.append(f"public URL served Content-Encoding {encoding!r}, expected {expected_encoding!r}")
     if problems:
         raise DeployError(f"verification of {item['key']} failed: " + "; ".join(problems))
     print(f"Verified: s3://{bucket}/{item['key']} (headers + metadata) and {url} sha256={public_sha}")
@@ -555,23 +599,25 @@ def upload(
         print("::warning::deploy_latest and deploy_versioned are both false; nothing to upload")
         return plan
     mode = "DRY RUN - would upload" if dry_run else "Uploading"
-    rows = ["| object | size | sha256 (gz) | cache-control |", "|---|---:|---|---|"]
+    rows = ["| object | size | sha256 (compressed) | cache-control |", "|---|---:|---|---|"]
     for item in plan:
         url = f"{repository_url.rstrip('/')}/{item['key']}"
         print(
-            f"{mode}: s3://{bucket}/{item['key']}  size={item['gz_size']}  sha256={item['gz_sha256']}  "
+            f"{mode}: s3://{bucket}/{item['key']}  size={item['compressed_size']}  sha256={item['compressed_sha256']}  "
             f"(signed extension sha256={item['signed_sha256']}, {item['signed_size']} bytes)  "
             f"cache-control='{item['cache_control']}'  -> {url}"
         )
-        rows.append(f"| `{item['key']}` | {item['gz_size']} | `{item['gz_sha256']}` | {item['cache_control']} |")
+        rows.append(f"| `{item['key']}` | {item['compressed_size']} | `{item['compressed_sha256']}` | {item['cache_control']} |")
         if dry_run:
             continue
+        wasm = is_wasm(item["arch"])
         result = _aws(
             [
                 "s3", "cp", str(out_dir / item["file"]), f"s3://{bucket}/{item['key']}",
-                "--content-type", "application/octet-stream",
+                "--content-type", WASM_CONTENT_TYPE if wasm else NATIVE_CONTENT_TYPE,
+                *(["--content-encoding", "br"] if wasm else []),
                 "--cache-control", item["cache_control"],
-                "--metadata", f"sha256={item['gz_sha256']},extension-sha256={item['signed_sha256']}",
+                "--metadata", f"sha256={item['compressed_sha256']},extension-sha256={item['signed_sha256']}",
                 "--no-progress", "--only-show-errors",
             ],
             endpoint,

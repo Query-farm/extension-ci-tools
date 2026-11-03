@@ -30,17 +30,18 @@ on:
       duckdb_version:
         required: true
         type: string
-      # ';' separated architectures not to publish. DuckDB-Wasm repository support is unverified.
+      # ';' separated architectures not to publish, even though they were built.
+      # To skip wasm entirely, exclude it from the build workflow instead.
       exclude_archs:
         required: false
         type: string
-        default: "wasm_mvp;wasm_eh;wasm_threads"
-      # Upload to <duckdb_version>/<platform>/<name>.duckdb_extension.gz (what INSTALL fetches).
+        default: ""
+      # Upload to <duckdb_version>/<platform>/<name>.duckdb_extension.{gz,wasm} (what INSTALL/LOAD fetch).
       deploy_latest:
         required: false
         type: boolean
         default: true
-      # Upload to <name>/<extension_version>/<duckdb_version>/<platform>/<name>.duckdb_extension.gz.
+      # Upload to <name>/<extension_version>/<duckdb_version>/<platform>/<name>.duckdb_extension.{gz,wasm}.
       deploy_versioned:
         required: false
         type: boolean
@@ -143,6 +144,9 @@ jobs:
           # _extension_distribution.yml: <name>-<version>-extension-<arch>; build.yml: <group>-extensions-<arch>
           pattern: "*-extension*-*"
           path: ${{ runner.temp }}/qf-artifacts
+
+      - name: Install brotli (wasm extensions are published brotli-compressed)
+        run: command -v brotli >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq brotli; }
 
       - name: Validate, sign and verify
         env:
