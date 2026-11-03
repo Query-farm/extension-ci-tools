@@ -144,6 +144,9 @@ jobs:
           pattern: "*-extension*-*"
           path: ${{ runner.temp }}/qf-artifacts
 
+      - name: Install brotli (wasm extensions are published brotli-compressed)
+        run: command -v brotli >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq brotli; }
+
       - name: Validate, sign and verify
         env:
           SIGNING_KEY: ${{ secrets.signing_key }}
