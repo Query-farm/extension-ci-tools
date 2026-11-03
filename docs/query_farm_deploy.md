@@ -16,8 +16,8 @@ repository: R2 bucket `query-farm-duckdb-extensions`, served at
    from `build.yml` (the extension must sit at `<duckdb_version>/<arch>/` inside it;
    other extensions and test-support bundles in it are ignored) or
    `<extension_name>-<duckdb_version>-extension-<arch>` from `_extension_distribution.yml`.
-   Two artifacts providing the same arch fail the deploy. Then drop the architectures in `exclude_archs`. By default
-   that is all wasm archs, because DuckDB-Wasm repository support is unverified.
+   Two artifacts providing the same arch fail the deploy. Then drop the architectures in `exclude_archs` (none by default,
+   so every architecture the build produced is published).
 3. **Footer checks** for each arch. The deploy fails if the footer magic is wrong,
    if the footer platform differs from the artifact's arch, or if the footer DuckDB
    version differs from `duckdb_version`. C API (`C_STRUCT`) extensions record the
@@ -31,7 +31,9 @@ repository: R2 bucket `query-farm-duckdb-extensions`, served at
    `<repository_url>/.well-known/duckdb-extension-repo.json`. The deploy fails if
    the signing key's public key is not listed there. That catches a rotated secret
    whose key was never published.
-6. **gzip -9** each signed file, upload the `.gz` files and `manifest.json` as the
+6. **Compress** each signed file: `gzip -9` to `<name>.duckdb_extension.gz` natively,
+   brotli to `<name>.duckdb_extension.wasm` (`Content-Type: application/wasm`,
+   `Content-Encoding: br`) for wasm, which is what DuckDB-Wasm requests. Upload those files and `manifest.json` as the
    workflow artifact `<name>-<duckdb_version>-signed`, then upload to R2. With
    `dry_run`, it only prints each key, size and sha256. Otherwise each object is
    checked after upload: `head-object` must show the expected size, content type,
@@ -128,7 +130,7 @@ Query.Farm differences from upstream:
   (`test_jobs`, default true; linux_arm64 is not tested, as in the legacy pipeline).
 - Artifacts are named `<group>-extensions-<arch>` and contain an extension repository tree.
 
-Other inputs: `exclude_archs` (default `wasm_mvp;wasm_eh;wasm_threads`),
+Other inputs: `exclude_archs` (default empty),
 `deploy_latest` / `deploy_versioned` (default true), `require_release_label`
 (default true; set false only for testing, together with `dry_run`),
 `key_prefix` (default empty; e.g. `_pilot/` puts every key under a throwaway
@@ -141,3 +143,15 @@ Publish the new public key in the well-known file first. The file lists the prim
 and a standby key. Wait for its cache to expire, then swap the
 `QUERY_FARM_EXTENSION_SIGNING_KEY` secret. If the secret's key is not published,
 step 5 fails the deploy.
+
+## Loading wasm extensions
+
+DuckDB-Wasm uses the same repository flow as native DuckDB, and the `FROM` on `LOAD` is required:
+a bare `LOAD` only trusts the core and community keys, so it fails the signature check.
+
+```sql
+SET allow_extension_repositories = 'allowed';
+CREATE EXTENSION REPOSITORY query_farm WITH PREFIX 'https://duckdb-extensions.query.farm';
+INSTALL <name> FROM query_farm;
+LOAD <name> FROM query_farm;
+```
