@@ -268,5 +268,85 @@ class PrepareTest(unittest.TestCase):
             self.prepare()
 
 
+class PurgeTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        manifest = {
+            "extension_name": "quack",
+            "duckdb_version": "v2.0.0",
+            "files": [
+                {"arch": "linux_amd64", "extension_version": "abc123", "file": "a"},
+                {"arch": "wasm_eh", "extension_version": "abc123", "file": "b"},
+            ],
+        }
+        (self.tmp / "manifest.json").write_text(json.dumps(manifest))
+        self.calls = []
+
+    def run_purge(self, token="tok", dry_run=False, purger=None, **kwargs):
+        def record(zone_id, token, urls):
+            self.calls.append((zone_id, token, list(urls)))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            urls = deploy.purge(self.tmp, "https://repo.example/", "zone1", token, kwargs.pop("latest", True),
+                                kwargs.pop("versioned", True), dry_run, purger=purger or record,
+                                sleep=lambda _: None, **kwargs)
+        return urls, out.getvalue()
+
+    def test_purges_every_uploaded_url_on_both_schemes(self):
+        urls, _ = self.run_purge()
+        expected_keys = [
+            "quack/abc123/v2.0.0/linux_amd64/quack.duckdb_extension.gz",
+            "quack/abc123/v2.0.0/wasm_eh/quack.duckdb_extension.wasm",
+            "v2.0.0/linux_amd64/quack.duckdb_extension.gz",
+            "v2.0.0/wasm_eh/quack.duckdb_extension.wasm",
+        ]
+        self.assertEqual(urls, [f"{s}://repo.example/{k}" for k in expected_keys for s in ("https", "http")])
+        self.assertEqual(self.calls, [("zone1", "tok", urls)])
+
+    def test_latest_only_and_key_prefix(self):
+        urls, _ = self.run_purge(versioned=False, key_prefix="_pilot/")
+        self.assertEqual(urls[0], "https://repo.example/_pilot/v2.0.0/linux_amd64/quack.duckdb_extension.gz")
+        self.assertEqual(len(urls), 4)
+
+    def test_dry_run_purges_nothing(self):
+        urls, out = self.run_purge(dry_run=True)
+        self.assertEqual(self.calls, [])
+        self.assertIn("DRY RUN - would purge: https://repo.example/v2.0.0/linux_amd64/quack.duckdb_extension.gz", out)
+        self.assertEqual(len(urls), 8)
+
+    def test_missing_token_warns_and_skips(self):
+        urls, out = self.run_purge(token="")
+        self.assertEqual((urls, self.calls), ([], []))
+        self.assertIn("::warning", out)
+
+    def test_batches_of_100(self):
+        manifest = json.loads((self.tmp / "manifest.json").read_text())
+        manifest["files"] = [{"arch": f"arch{i}", "extension_version": "v", "file": "x"} for i in range(30)]
+        (self.tmp / "manifest.json").write_text(json.dumps(manifest))
+        urls, _ = self.run_purge()
+        self.assertEqual(len(urls), 120)
+        self.assertEqual([len(c[2]) for c in self.calls], [100, 20])
+
+    def test_retries_then_fails(self):
+        attempts = []
+        def flaky(zone_id, token, urls):
+            attempts.append(1)
+            raise deploy.DeployError("Cloudflare cache purge failed: boom")
+        with self.assertRaisesRegex(deploy.DeployError, "boom"):
+            self.run_purge(purger=flaky)
+        self.assertEqual(len(attempts), deploy.PURGE_ATTEMPTS)
+
+    def test_retry_recovers(self):
+        attempts = []
+        def once(zone_id, token, urls):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise deploy.DeployError("Cloudflare cache purge failed: transient")
+        urls, _ = self.run_purge(purger=once)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(urls), 8)
+
+
 if __name__ == "__main__":
     unittest.main()

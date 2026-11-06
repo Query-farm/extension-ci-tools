@@ -39,6 +39,13 @@ repository: R2 bucket `query-farm-duckdb-extensions`, served at
    checked after upload: `head-object` must show the expected size, content type,
    cache-control and sha256 metadata, and the object fetched from the public URL
    must have the same sha256.
+7. **Purge** every uploaded URL, over `https` and `http`, from the Cloudflare cache
+   (zone `cloudflare_zone_id`, token `cloudflare_purge_token`). Cloudflare caches
+   GETs but answers HEADs from R2. DuckDB HEADs a file, fetches it in ranges and
+   rejects a response whose ETag differs from the HEAD's, so a cached copy of an
+   overwritten "latest" object makes `INSTALL` fail ("ETag ... remote file has
+   changed") until it expires. DuckDB's own repositories purge the same way. Without
+   the token the step warns and skips; with `dry_run` it lists the URLs.
 
 | path | when | Cache-Control |
 |---|---|---|
@@ -57,6 +64,7 @@ tag, or the short commit hash when HEAD has no tag.
 | `QUERY_FARM_EXTENSION_SIGNING_KEY` | `signing_key` | org secret, PEM RSA private key (primary repo key) |
 | `QUERY_FARM_R2_ACCESS_KEY_ID` | `r2_access_key_id` | R2 API token with write access to the bucket; optional with `dry_run` |
 | `QUERY_FARM_R2_SECRET_ACCESS_KEY` | `r2_secret_access_key` | as above |
+| `QUERY_FARM_CLOUDFLARE_PURGE_TOKEN` | `cloudflare_purge_token` | Cloudflare API token, Zone / Cache Purge on `query.farm` only; optional (purge skipped with a warning) |
 
 Secrets go to the reusable workflow explicitly, as in the snippet below. Do not use
 `secrets: inherit`. The key is written to a mode-0600 file in `$RUNNER_TEMP` and
@@ -101,6 +109,7 @@ jobs:
       signing_key: ${{ secrets.QUERY_FARM_EXTENSION_SIGNING_KEY }}
       r2_access_key_id: ${{ secrets.QUERY_FARM_R2_ACCESS_KEY_ID }}
       r2_secret_access_key: ${{ secrets.QUERY_FARM_R2_SECRET_ACCESS_KEY }}
+      cloudflare_purge_token: ${{ secrets.QUERY_FARM_CLOUDFLARE_PURGE_TOKEN }}
 ```
 
 The legacy build job (`_extension_distribution.yml@query-farm` with `extension_name`,

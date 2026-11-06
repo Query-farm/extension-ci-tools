@@ -15,6 +15,7 @@
 #       signing_key: ${{ secrets.QUERY_FARM_EXTENSION_SIGNING_KEY }}
 #       r2_access_key_id: ${{ secrets.QUERY_FARM_R2_ACCESS_KEY_ID }}
 #       r2_secret_access_key: ${{ secrets.QUERY_FARM_R2_SECRET_ACCESS_KEY }}
+#       cloudflare_purge_token: ${{ secrets.QUERY_FARM_CLOUDFLARE_PURGE_TOKEN }}
 #
 # See docs/query_farm_deploy.md.
 #
@@ -73,6 +74,11 @@ on:
         required: false
         type: string
         default: "bb68a133a66d26a310231495b13479a1"
+      # Cloudflare zone serving repository_url (query.farm). Not secret.
+      cloudflare_zone_id:
+        required: false
+        type: string
+        default: "f762db64a4e321f026a26321acf2b65b"
       # The extension-ci-tools ref/repository providing scripts/query_farm/deploy.py.
       ci_tools_version:
         required: false
@@ -91,6 +97,12 @@ on:
         required: false
       r2_secret_access_key:
         description: R2 secret access key (optional when dry_run)
+        required: false
+      cloudflare_purge_token:
+        description: >-
+          Cloudflare API token with Zone / Cache Purge on cloudflare_zone_id (QUERY_FARM_CLOUDFLARE_PURGE_TOKEN).
+          Without it the purge is skipped with a warning, and INSTALL can fail with an ETag mismatch for up to
+          5 minutes after each publish.
         required: false
 
 permissions:
@@ -209,6 +221,28 @@ jobs:
             --bucket "$R2_BUCKET" \
             --endpoint "$R2_ENDPOINT" \
             --repository-url "$REPOSITORY_URL" \
+            --deploy-latest "$DEPLOY_LATEST" \
+            --deploy-versioned "$DEPLOY_VERSIONED" \
+            --dry-run "$DRY_RUN" \
+            --key-prefix "$KEY_PREFIX"
+
+      # The CDN caches GETs but answers HEADs from R2, so until a cached copy of an overwritten file
+      # expires, DuckDB sees two ETags and INSTALL fails. Purge exactly what was just uploaded.
+      - name: Purge the CDN cache
+        env:
+          CLOUDFLARE_PURGE_TOKEN: ${{ secrets.cloudflare_purge_token }}
+          CLOUDFLARE_ZONE_ID: ${{ inputs.cloudflare_zone_id }}
+          REPOSITORY_URL: ${{ inputs.repository_url }}
+          DEPLOY_LATEST: ${{ inputs.deploy_latest }}
+          DEPLOY_VERSIONED: ${{ inputs.deploy_versioned }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          KEY_PREFIX: ${{ inputs.key_prefix }}
+        run: |
+          set -euo pipefail
+          python3 extension-ci-tools/scripts/query_farm/deploy.py purge \
+            --out-dir "$RUNNER_TEMP/qf-signed" \
+            --repository-url "$REPOSITORY_URL" \
+            --zone-id "$CLOUDFLARE_ZONE_ID" \
             --deploy-latest "$DEPLOY_LATEST" \
             --deploy-versioned "$DEPLOY_VERSIONED" \
             --dry-run "$DRY_RUN" \

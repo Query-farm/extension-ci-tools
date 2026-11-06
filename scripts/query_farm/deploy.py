@@ -7,6 +7,7 @@ Used by .github/workflows/_query_farm_deploy.yml. Subcommands:
   prepare        validate footers, sign, verify against the published keys, compress
                  (gzip natively, brotli for wasm, as DuckDB's own repository does)
   upload         upload the prepared files to R2 (or list them in dry-run mode)
+  purge          purge the uploaded URLs from the Cloudflare cache in front of R2
 
 Signing mirrors DuckDB's scripts/extension-upload-single.sh: the trailing
 256-byte signature slot is dropped, the remainder is hashed with the
@@ -31,6 +32,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 FOOTER_SIZE = 512
@@ -46,6 +49,9 @@ VERSIONED_CACHE_CONTROL = "public, max-age=31536000, immutable"
 WASM_CONTENT_TYPE = "application/wasm"
 NATIVE_CONTENT_TYPE = "application/octet-stream"
 ARTIFACT_MARKER = "-extension-"
+CLOUDFLARE_API = "https://api.cloudflare.com/client/v4"
+PURGE_BATCH = 100  # single-file purge: at most 100 URLs per request on every plan
+PURGE_ATTEMPTS = 3
 BUILD_ARTIFACT = re.compile(r"(?P<group>[A-Za-z0-9_.-]+)-extensions-(?P<arch>[a-z0-9_]+)")  # used with fullmatch
 
 
@@ -631,6 +637,100 @@ def upload(
     return plan
 
 
+def purge_urls(plan: list[dict], repository_url: str) -> list[str]:
+    """Every public URL a client may have cached for the planned objects, over https and http.
+
+    The CDN caches GET responses but answers HEAD from the origin. DuckDB's httpfs HEADs a file,
+    then fetches it in ranges and refuses a response whose ETag differs from the HEAD's, so an
+    overwritten object that is still cached fails INSTALL until the cached copy expires.
+    The cache key includes the scheme, and a repository may be configured with either.
+    """
+    base = repository_url.rstrip("/")
+    host = base.split("://", 1)[-1]
+    urls = []
+    for item in plan:
+        for scheme in ("https", "http"):
+            url = f"{scheme}://{host}/{item['key']}"
+            if url not in urls:
+                urls.append(url)
+    return urls
+
+
+def _cloudflare_purge(zone_id: str, token: str, urls: list[str]) -> None:
+    body = json.dumps({"files": urls}).encode()
+    request = urllib.request.Request(
+        f"{CLOUDFLARE_API}/zones/{zone_id}/purge_cache",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "query-farm-extension-deploy",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            result = json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        try:
+            result = json.loads(error.read() or b"{}")
+        except ValueError:
+            result = {}
+        result.setdefault("errors", [{"message": f"HTTP {error.code}"}])
+        result["success"] = False
+    except Exception as error:  # noqa: BLE001
+        result = {"success": False, "errors": [{"message": str(error)}]}
+    if not result.get("success"):
+        messages = "; ".join(str(e.get("message", e)) for e in result.get("errors") or []) or "unknown error"
+        raise DeployError(f"Cloudflare cache purge failed: {messages}")
+
+
+def purge(
+    out_dir: Path,
+    repository_url: str,
+    zone_id: str,
+    token: str,
+    deploy_latest: bool,
+    deploy_versioned: bool,
+    dry_run: bool,
+    key_prefix: str = "",
+    purger=_cloudflare_purge,
+    sleep=None,
+) -> list[str]:
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    urls = purge_urls(object_plan(manifest, deploy_latest, deploy_versioned, key_prefix), repository_url)
+    if not urls:
+        return urls
+    if dry_run:
+        for url in urls:
+            print(f"DRY RUN - would purge: {url}")
+        return urls
+    if not token:
+        print(
+            "::warning title=Query.Farm deploy::no cloudflare_purge_token; the CDN keeps serving the previous "
+            "build for up to 5 minutes, and INSTALL fails with an ETag mismatch until then. Pass "
+            "secrets.QUERY_FARM_CLOUDFLARE_PURGE_TOKEN."
+        )
+        return []
+    if not zone_id:
+        raise DeployError("cloudflare_zone_id is empty")
+    sleep = sleep or time.sleep
+    for start in range(0, len(urls), PURGE_BATCH):
+        batch = urls[start:start + PURGE_BATCH]
+        for attempt in range(1, PURGE_ATTEMPTS + 1):
+            try:
+                purger(zone_id, token, batch)
+                break
+            except DeployError as error:
+                if attempt == PURGE_ATTEMPTS:
+                    raise
+                print(f"::warning::{error} (attempt {attempt}/{PURGE_ATTEMPTS}); retrying")
+                sleep(5 * attempt)
+        for url in batch:
+            print(f"Purged: {url}")
+    return urls
+
+
 def _bool(value: str) -> bool:
     lowered = value.strip().lower()
     if lowered in ("true", "1", "yes"):
@@ -671,6 +771,15 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("--key-prefix", default="", help="prepend to every object key, e.g. '_pilot/' (testing)")
     up.add_argument("--verify", type=_bool, default=True, help="check each object via head-object and its public URL")
 
+    pg = sub.add_parser("purge", help="token from $CLOUDFLARE_PURGE_TOKEN")
+    pg.add_argument("--out-dir", type=Path, required=True)
+    pg.add_argument("--repository-url", required=True)
+    pg.add_argument("--zone-id", required=True)
+    pg.add_argument("--deploy-latest", type=_bool, default=True)
+    pg.add_argument("--deploy-versioned", type=_bool, default=True)
+    pg.add_argument("--dry-run", type=_bool, default=False)
+    pg.add_argument("--key-prefix", default="")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "check-context":
@@ -693,6 +802,17 @@ def main(argv: list[str] | None = None) -> int:
                 args.signing_key,
                 well_known,
                 args.require_release_label,
+            )
+        elif args.command == "purge":
+            purge(
+                args.out_dir,
+                args.repository_url,
+                args.zone_id,
+                os.environ.get("CLOUDFLARE_PURGE_TOKEN", ""),
+                args.deploy_latest,
+                args.deploy_versioned,
+                args.dry_run,
+                args.key_prefix,
             )
         else:
             upload(
